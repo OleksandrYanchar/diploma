@@ -1,27 +1,33 @@
-"""Authentication router — registration and email verification endpoints.
+"""Authentication router — registration, email verification, and login endpoints.
 
 Exposes:
-- POST /auth/register  — create a new user account (SR-01, SR-02, SR-03)
+- POST /auth/register     — create a new user account (SR-01, SR-02, SR-03)
 - GET  /auth/verify-email — consume the email verification token (SR-03)
+- POST /auth/login        — authenticate and receive JWT + refresh token
+                            (SR-02, SR-05, SR-06, SR-07, SR-10, SR-16)
 
 Route handlers are intentionally thin: they extract HTTP inputs, delegate all
 business logic to ``auth.service``, and format the response.  No security
 decisions are made here.
 
-Security note: both endpoints are unauthenticated by design (no
+Security note: all endpoints are unauthenticated by design (no
 ``get_current_user`` dependency).  They are the entry points for account
-creation and are intentionally public.  Rate limiting is enforced at the Nginx
-layer (SR-15).
+creation and authentication, and are intentionally public.  Rate limiting is
+enforced at the Nginx layer (SR-15).
 """
 
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, status
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.service import login as login_service
 from app.auth.service import register_user, verify_email
 from app.core.config import Settings, get_settings
 from app.core.database import get_db
+from app.core.redis import get_redis
+from app.schemas.auth import LoginRequest, TokenResponse
 from app.schemas.user import UserCreate, UserResponse
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -97,3 +103,55 @@ async def verify_email_endpoint(
     """
     await verify_email(token=token, db=db)
     return {"message": "Email verified successfully."}
+
+
+@router.post(
+    "/login",
+    response_model=TokenResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Authenticate and receive access + refresh tokens",
+)
+async def login(
+    body: LoginRequest,
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),  # type: ignore[type-arg]
+    settings: Settings = Depends(get_settings),
+) -> TokenResponse:
+    """Authenticate a user with email and password and issue a session.
+
+    Delegates to ``login`` in the auth service, which performs credential
+    verification, account lockout enforcement, optional MFA gating, session
+    creation in Redis, and audit log writes.
+
+    On success, returns a short-lived JWT access token (SR-06) and an opaque
+    refresh token (SR-07).  The refresh token is stored in the DB as a
+    SHA-256 hash only — the raw value is returned here once and never persisted.
+
+    Args:
+        body:     Validated ``LoginRequest`` payload (email + password; optional
+                  TOTP code for MFA accounts in Phase 3).
+        db:       Injected async database session.
+        redis:    Injected Redis client for session storage (SR-10).
+        settings: Injected application settings.
+
+    Returns:
+        A ``TokenResponse`` containing ``access_token``, ``refresh_token``,
+        ``token_type="bearer"``, and ``expires_in`` (seconds).
+
+    Raises:
+        HTTPException 401: Invalid credentials (wrong email or wrong password).
+        HTTPException 403: Account deactivated or temporarily locked (SR-05).
+        HTTPException 200: MFA is enabled; client must supply TOTP code (SR-04).
+    """
+    access_token, raw_refresh = await login_service(
+        email=body.email,
+        password=body.password,
+        db=db,
+        redis=redis,
+        settings=settings,
+    )
+    return TokenResponse(
+        access_token=access_token,
+        refresh_token=raw_refresh,
+        expires_in=settings.access_token_expire_minutes * 60,
+    )
