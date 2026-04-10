@@ -38,7 +38,13 @@ from app.core.redis import get_redis
 from app.core.security import decode_access_token
 from app.dependencies.auth import get_current_user
 from app.models.user import User
-from app.schemas.auth import LoginRequest, LogoutRequest, RefreshRequest, TokenResponse
+from app.schemas.auth import (
+    LoginRequest,
+    LogoutRequest,
+    MFARequiredResponse,
+    RefreshRequest,
+    TokenResponse,
+)
 from app.schemas.user import UserCreate, UserResponse
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -118,7 +124,7 @@ async def verify_email_endpoint(
 
 @router.post(
     "/login",
-    response_model=TokenResponse,
+    response_model=None,
     status_code=status.HTTP_200_OK,
     summary="Authenticate and receive access + refresh tokens",
 )
@@ -127,16 +133,28 @@ async def login(
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),  # type: ignore[type-arg]
     settings: Settings = Depends(get_settings),
-) -> TokenResponse:
+) -> TokenResponse | MFARequiredResponse:
     """Authenticate a user with email and password and issue a session.
 
     Delegates to ``login`` in the auth service, which performs credential
-    verification, account lockout enforcement, optional MFA gating, session
-    creation in Redis, and audit log writes.
+    verification, account lockout enforcement, MFA gating, session creation
+    in Redis, and audit log writes.
 
     On success, returns a short-lived JWT access token (SR-06) and an opaque
     refresh token (SR-07).  The refresh token is stored in the DB as a
-    SHA-256 hash only -- the raw value is returned here once and never persisted.
+    SHA-256 hash only — the raw value is returned here once and never persisted.
+
+    When the account has MFA enabled the service returns the sentinel
+    ``(None, None)`` — no session is created and no tokens are issued.  This
+    endpoint then returns an ``MFARequiredResponse`` (HTTP 200) so that the
+    client can prompt the user for their TOTP code and re-submit.  The TOTP
+    verification path is implemented in Phase 3.
+
+    ``response_model=None`` is set intentionally: the endpoint returns two
+    distinct Pydantic models (``TokenResponse`` or ``MFARequiredResponse``)
+    depending on MFA state.  FastAPI cannot automatically select the correct
+    serializer when ``response_model`` is a Union, so we return the Pydantic
+    objects directly and let FastAPI serialize whichever model is returned.
 
     Args:
         body:     Validated ``LoginRequest`` payload (email + password; optional
@@ -146,13 +164,13 @@ async def login(
         settings: Injected application settings.
 
     Returns:
-        A ``TokenResponse`` containing ``access_token``, ``refresh_token``,
-        ``token_type="bearer"``, and ``expires_in`` (seconds).
+        ``TokenResponse`` (access_token, refresh_token, token_type, expires_in)
+        on successful authentication, or ``MFARequiredResponse`` (mfa_required,
+        message) when the account requires a TOTP code.
 
     Raises:
         HTTPException 401: Invalid credentials (wrong email or wrong password).
         HTTPException 403: Account deactivated or temporarily locked (SR-05).
-        HTTPException 200: MFA is enabled; client must supply TOTP code (SR-04).
     """
     access_token, raw_refresh = await login_service(
         email=body.email,
@@ -161,6 +179,12 @@ async def login(
         redis=redis,
         settings=settings,
     )
+
+    if access_token is None:
+        # MFA gate: password was valid but a TOTP code is required.
+        # No tokens were issued by the service; signal the client to re-submit.
+        return MFARequiredResponse()
+
     return TokenResponse(
         access_token=access_token,
         refresh_token=raw_refresh,

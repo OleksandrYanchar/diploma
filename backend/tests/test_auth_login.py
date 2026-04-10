@@ -14,12 +14,15 @@ depends on state produced by another test.
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.audit_log import AuditLog
+from app.models.user import User
 
 # ---------------------------------------------------------------------------
 # URL constants
@@ -236,12 +239,10 @@ async def test_login_audit_log_written_on_success(
     )
     assert login_resp.status_code == 200
 
-    import uuid as _uuid
-
     result = await db_session.execute(
         select(AuditLog).where(
             AuditLog.action == "LOGIN_SUCCESS",
-            AuditLog.user_id == _uuid.UUID(user_id),
+            AuditLog.user_id == uuid.UUID(user_id),
         )
     )
     log_entry = result.scalar_one_or_none()
@@ -284,15 +285,167 @@ async def test_login_audit_log_written_on_failure(
     )
     assert fail_resp.status_code == 401
 
-    import uuid as _uuid
-
     result = await db_session.execute(
         select(AuditLog).where(
             AuditLog.action == "LOGIN_FAILED",
-            AuditLog.user_id == _uuid.UUID(user_id),
+            AuditLog.user_id == uuid.UUID(user_id),
         )
     )
     log_entry = result.scalar_one_or_none()
 
     assert log_entry is not None, "Expected a LOGIN_FAILED audit log entry"
     assert log_entry.details == {"reason": "invalid_password"}
+
+
+# ---------------------------------------------------------------------------
+# P2 fix: LOGIN_FAILED audit log for unknown-email path
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_login_failed_audit_log_unknown_email(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    """A LOGIN_FAILED audit log entry is written when the email is not registered.
+
+    Verifies that the unknown-email path in login() writes an AuditLog entry
+    with action="LOGIN_FAILED", user_id=None, and details containing
+    reason="user_not_found" AFTER the dummy hash runs (SR-16).
+
+    The query is scoped by action + user_id=None to satisfy ADR-18.  A single
+    entry is expected; if prior tests happen to produce a user_id=None entry
+    with a different reason, the details assertion differentiates them.
+    """
+    response = await async_client.post(
+        _LOGIN_URL,
+        json={"email": "never_registered@example.com", "password": _STRONG_PASSWORD},
+    )
+    assert response.status_code == 401
+
+    result = await db_session.execute(
+        select(AuditLog).where(
+            AuditLog.action == "LOGIN_FAILED",
+            AuditLog.user_id.is_(None),
+        )
+    )
+    log_entry = result.scalar_one_or_none()
+
+    assert (
+        log_entry is not None
+    ), "Expected a LOGIN_FAILED audit log entry for unknown email"
+    assert log_entry.user_id is None
+    assert log_entry.details is not None
+    assert log_entry.details.get("reason") == "user_not_found"
+
+
+# ---------------------------------------------------------------------------
+# P1 fix: MFA gate returns MFARequiredResponse (not HTTPException 200)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_login_mfa_gate_returns_mfa_required(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """When mfa_enabled=True the login endpoint returns HTTP 200 with mfa_required=True.
+
+    Directly sets user.mfa_enabled=True in the DB without calling a Phase 3
+    MFA setup endpoint.  Verifies that the response body has the
+    MFARequiredResponse shape (mfa_required=True) and NOT a TokenResponse shape
+    (no access_token or refresh_token fields).  Ensures the fix for raising
+    HTTPException(status_code=200) is in place (SR-04 gate behaviour).
+    """
+    email = "mfa_gate_shape@example.com"
+    reg_resp = await async_client.post(
+        _REGISTER_URL,
+        json={"email": email, "password": _STRONG_PASSWORD},
+    )
+    assert reg_resp.status_code == 201
+    user_id = reg_resp.json()["id"]
+
+    # Complete email verification.
+    captured = capsys.readouterr()
+    raw_token = captured.out.strip().rsplit(": ", maxsplit=1)[-1]
+    verify_resp = await async_client.get(_VERIFY_URL, params={"token": raw_token})
+    assert verify_resp.status_code == 200
+
+    # Directly enable MFA on the user record to simulate a Phase 3-enrolled user.
+    user_result = await db_session.execute(
+        select(User).where(User.id == uuid.UUID(user_id))
+    )
+    user = user_result.scalar_one()
+    user.mfa_enabled = True
+    await db_session.commit()
+
+    response = await async_client.post(
+        _LOGIN_URL,
+        json={"email": email, "password": _STRONG_PASSWORD},
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+    assert (
+        data.get("mfa_required") is True
+    ), "Expected mfa_required=True in response body"
+    assert (
+        "access_token" not in data
+    ), "access_token must NOT be present on MFA gate response"
+    assert (
+        "refresh_token" not in data
+    ), "refresh_token must NOT be present on MFA gate response"
+
+
+@pytest.mark.asyncio
+async def test_login_mfa_gate_writes_audit_log(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An audit log with action="LOGIN_MFA_REQUIRED" is written on the MFA gate path.
+
+    Verifies SR-16: every security-relevant event, including the MFA gate,
+    produces an audit log entry.  The entry must be scoped to the correct
+    user_id so that it can be correlated in forensic analysis (ADR-18).
+    """
+    email = "mfa_gate_audit@example.com"
+    reg_resp = await async_client.post(
+        _REGISTER_URL,
+        json={"email": email, "password": _STRONG_PASSWORD},
+    )
+    assert reg_resp.status_code == 201
+    user_id = reg_resp.json()["id"]
+
+    # Complete email verification.
+    captured = capsys.readouterr()
+    raw_token = captured.out.strip().rsplit(": ", maxsplit=1)[-1]
+    verify_resp = await async_client.get(_VERIFY_URL, params={"token": raw_token})
+    assert verify_resp.status_code == 200
+
+    # Enable MFA directly in the DB.
+    user_result = await db_session.execute(
+        select(User).where(User.id == uuid.UUID(user_id))
+    )
+    user = user_result.scalar_one()
+    user.mfa_enabled = True
+    await db_session.commit()
+
+    mfa_resp = await async_client.post(
+        _LOGIN_URL,
+        json={"email": email, "password": _STRONG_PASSWORD},
+    )
+    assert mfa_resp.status_code == 200
+
+    result = await db_session.execute(
+        select(AuditLog).where(
+            AuditLog.action == "LOGIN_MFA_REQUIRED",
+            AuditLog.user_id == uuid.UUID(user_id),
+        )
+    )
+    log_entry = result.scalar_one_or_none()
+
+    assert log_entry is not None, "Expected a LOGIN_MFA_REQUIRED audit log entry"
+    assert log_entry.user_id == uuid.UUID(user_id)

@@ -204,13 +204,13 @@ async def login(
     db: AsyncSession,
     redis: Redis,  # type: ignore[type-arg]
     settings: Settings,
-) -> tuple[str, str]:
+) -> tuple[str, str] | tuple[None, None]:
     """Authenticate a user and create a new session, issuing JWT + refresh token.
 
     Enforces SR-02 (Argon2id verification), SR-05 (lockout after N failures),
     SR-06 (short-lived JWT access token), SR-07 (hashed refresh token in DB),
     SR-10 (Redis session keyed by session_id), and SR-16 (audit log on both
-    success and failure).
+    success and failure, including MFA gate and unknown-email events).
 
     The email lookup uses a dummy hash comparison when the user is not found to
     prevent timing-based email enumeration: the Argon2id computation always
@@ -224,16 +224,20 @@ async def login(
         settings: Application settings supplying token lifetimes and lockout policy.
 
     Returns:
-        A 2-tuple ``(access_token, raw_refresh_token)`` where ``access_token``
-        is a compact JWT string and ``raw_refresh_token`` is the opaque token
-        that must be returned to the client and never stored plaintext server-side.
+        A 2-tuple ``(access_token, raw_refresh_token)`` on successful
+        authentication, where ``access_token`` is a compact JWT string and
+        ``raw_refresh_token`` is the opaque token that must be returned to the
+        client and never stored plaintext server-side.
+
+        Returns ``(None, None)`` when the password is correct but MFA is enabled
+        on the account.  The router must detect this sentinel and return an
+        ``MFARequiredResponse`` (HTTP 200) instead of a ``TokenResponse``.  No
+        session is created and no tokens are issued on this path.
 
     Raises:
         HTTPException 401: If credentials are invalid (wrong email or password).
             The same message is returned in both cases to prevent enumeration.
         HTTPException 403: If the account is deactivated or temporarily locked.
-        HTTPException 200: If the password is correct but MFA is enabled on the
-            account (mfa_required signal to the client to supply a TOTP code).
     """
 
     def _utcnow() -> datetime:
@@ -250,6 +254,18 @@ async def login(
         # Anti-timing: always perform a hash comparison so response time is
         # consistent whether or not the email exists in the database.
         verify_password(password, _DUMMY_HASH)
+
+        # SR-16: Audit log for the unknown-email path.  Written AFTER the dummy
+        # hash so that the anti-timing protection is never short-circuited.
+        db.add(
+            AuditLog(
+                user_id=None,
+                action="LOGIN_FAILED",
+                ip_address=None,
+                details={"reason": "user_not_found"},
+            )
+        )
+        await db.flush()
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     # ------------------------------------------------------------------
@@ -302,15 +318,25 @@ async def login(
     # ------------------------------------------------------------------
     # Step 6: MFA gate — if the account has MFA enabled, signal the client
     # to supply a TOTP code.  The TOTP verification path is Phase 3.
+    #
+    # Returning (None, None) rather than raising an HTTPException avoids the
+    # incorrect pattern of using HTTP 200 as an exception status code, which
+    # bypasses FastAPI's response_model serialization.  The router detects the
+    # sentinel and returns an MFARequiredResponse with HTTP 200.  No session is
+    # created and no tokens are issued on this path.
     # ------------------------------------------------------------------
     if user.mfa_enabled:
-        raise HTTPException(
-            status_code=200,
-            detail={
-                "mfa_required": True,
-                "message": "TOTP code required to complete login.",
-            },
+        # SR-16: Audit log for the MFA gate event (password verified, TOTP pending).
+        db.add(
+            AuditLog(
+                user_id=user.id,
+                action="LOGIN_MFA_REQUIRED",
+                ip_address=None,
+                details={"session_id": None},
+            )
         )
+        await db.commit()
+        return None, None
 
     # ------------------------------------------------------------------
     # Steps 7–16: Successful authentication path.
