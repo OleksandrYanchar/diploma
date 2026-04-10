@@ -20,8 +20,8 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, String, func
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy import JSON, DateTime, Enum, ForeignKey, String, func
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -82,8 +82,10 @@ class SecurityEvent(Base):
     )
 
     # Structured JSON payload; content is event-type-dependent.
+    # SQLAlchemy JSON type is used here for SQLite test compatibility.
+    # The Alembic migration renders this as JSONB in PostgreSQL (production).
     details: Mapped[dict | None] = mapped_column(
-        JSONB,
+        JSON,
         nullable=True,
         default=None,
     )
