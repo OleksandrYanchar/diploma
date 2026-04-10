@@ -94,7 +94,14 @@ Maintain strict separation between layers. Do not mix concerns:
 - `main` is the **stable branch**. It should always be in a working state.
 - Use **short-lived feature branches** named by phase or feature: `phase-2-auth`, `feature/step-up-auth`, `fix/token-rotation`.
 - Make **small, focused commits**. One logical change per commit. Avoid bundling unrelated changes.
-- Write **clear commit messages** in imperative form: `Add refresh token rotation with reuse detection`, not `fixed stuff` or `wip`.
+- Write **clear commit messages** using the conventional commit format with scope where applicable:
+  - `feat(auth): add email_verification_token_hash to User model` — auth implementation steps
+  - `feat(accounts): add AccountStatus enum and account_number field` — feature additions by module
+  - `docs: clarify phase 2 auth plan and ADR-15` — documentation-only changes
+  - `fix(auth): correct JTI blacklist TTL calculation` — bug fixes
+  - `test(auth): add refresh token rotation tests` — test-only additions
+  - Use `feat:` (no scope) only for cross-cutting infrastructure changes (Docker, Nginx, CI)
+  - Never use `wip`, `fixed stuff`, or vague messages
 - **Do not rewrite large sections of code without explanation.** If a significant refactor is needed, note it in a commit message or update `DECISIONS.md`.
 - Keep implementation **aligned with the documentation**. If you deviate from the documented design, update the docs in the same commit.
 

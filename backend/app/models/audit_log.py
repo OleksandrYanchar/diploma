@@ -17,8 +17,8 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, String, func
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy import JSON, DateTime, ForeignKey, String, func
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -68,8 +68,10 @@ class AuditLog(Base):
 
     # Structured JSON payload; content is action-dependent.
     # Examples: {"email": "...", "reason": "wrong_password"} for LOGIN_FAILED.
+    # SQLAlchemy JSON type is used here for SQLite test compatibility.
+    # The Alembic migration renders this as JSONB in PostgreSQL (production).
     details: Mapped[dict | None] = mapped_column(
-        JSONB,
+        JSON,
         nullable=True,
         default=None,
     )

@@ -293,6 +293,76 @@ The backend needs a dependency manager, a linting/style tool, and a test runner.
 
 ---
 
+## ADR-17 — SQLite Naive Datetime Normalisation in Tests
+
+**Status:** Accepted
+
+**Context:**  
+`DateTime(timezone=True)` columns return timezone-aware `datetime` objects from PostgreSQL but naive (no `tzinfo`) objects from SQLite/aiosqlite. Comparing a naive `locked_until` value from SQLite against `datetime.now(timezone.utc)` raises `TypeError: can't compare offset-naive and offset-aware datetimes`, causing lockout checks to fail in the test environment only.
+
+**Decision:** Normalise `locked_until` at comparison time in service code: if `locked_until.tzinfo is None`, attach `timezone.utc` before comparing. This branch is never taken against PostgreSQL (which always returns timezone-aware values) and has no production impact.
+
+**Rule:** Any service code that compares a `DateTime(timezone=True)` ORM field against a timezone-aware `datetime` must guard against naive values using this pattern:
+```python
+from datetime import timezone
+if dt.tzinfo is None:
+    dt = dt.replace(tzinfo=timezone.utc)
+```
+
+**Consequences:** Tests pass on SQLite and behaviour on PostgreSQL is identical.
+
+**Addendum — UUID coercion (same class of issue):**  
+SQLite/aiosqlite also raises `StatementError` when a plain string is bound to a `UUID(as_uuid=True)` column in a `WHERE` clause. The JWT `sub` claim is a string; `User.id` is `UUID`. Fix: convert with `uuid.UUID(user_id)` before the query. A `ValueError` on a malformed claim is caught and converted to HTTP 401. PostgreSQL accepts both forms natively.
+
+---
+
+## ADR-18 — Audit Log Test Queries Scoped by action + user_id
+
+**Status:** Accepted
+
+**Context:**  
+The SQLite in-memory engine is shared across all tests within a session (by design — schema creation is session-scoped for speed). Committed `AuditLog` rows from earlier tests accumulate. Querying by `action` alone causes `MultipleResultsFound` once several tests have written the same action string (e.g. `"LOGIN_FAILED"`).
+
+**Decision:** All audit log assertions in tests must filter by both `action` and `user_id`. `user_id` is taken from the registration response in each test, ensuring each assertion is scoped to the specific test's user.
+
+**Rule:** Never query `AuditLog` by `action` alone in tests. Always add `AuditLog.user_id == user_id` to the filter.
+
+**Consequences:** Test queries are slightly more verbose but resilient to execution order and accumulated state.
+
+---
+
+## ADR-16 — sqlalchemy.JSON in ORM Models, JSONB in Migrations
+
+**Status:** Accepted
+
+**Context:**  
+`AuditLog.details` and `SecurityEvent.details` were originally defined using `sqlalchemy.dialects.postgresql.JSONB` directly in the ORM model classes. This caused `AttributeError: visit_JSONB` when SQLite (the in-memory test backend) attempted to compile the schema during test session setup, blocking all tests.
+
+**Decision:** ORM model definitions use `sqlalchemy.JSON` (the cross-dialect generic type). Alembic migration files may continue to use `postgresql.JSONB` for the PostgreSQL-specific column type.
+
+**Rationale:** SQLAlchemy's `JSON` type maps to `JSONB` on PostgreSQL and to `TEXT`/`JSON` on SQLite, providing the cross-dialect compatibility that the test suite requires. The Alembic migration is the correct place to assert the PostgreSQL-specific storage type — it runs only against PostgreSQL and benefits from JSONB's indexing and containment operators. Mixing dialect-specific types into ORM model definitions couples the model layer to a single database engine, which breaks test isolation.
+
+**Rule:** All ORM model files under `app/models/` must use `sqlalchemy.JSON` for JSON columns. Alembic migration files under `alembic/versions/` may use `postgresql.JSONB`.
+
+**Consequences:** No change to the production PostgreSQL schema — migrations still emit `JSONB`. The test suite can use SQLite without modification.
+
+---
+
+## ADR-15 — email_verification_sent_at Deferred to Phase 6
+
+**Status:** Accepted
+
+**Context:**  
+The Phase 2 email verification flow stores a SHA-256-hashed verification token in `email_verification_token_hash` on the `User` row. A second column, `email_verification_sent_at`, was considered for Phase 2 to support re-send rate limiting (prevent a user from requesting a new verification email on every request).
+
+**Decision:** `email_verification_sent_at` is not added in Phase 2. Migration 0003 adds exactly one column: `email_verification_token_hash String(64) nullable`.
+
+**Rationale:** SR-03 requires email verification but does not specify a re-send rate limit. The Phase 2 API scope does not include a re-send endpoint. Adding `email_verification_sent_at` now would be speculative — it anticipates a feature that has no corresponding endpoint, test, or requirement in Phase 2. The column follows the same pattern as the password reset token timestamp (`password_reset_sent_at`), which is a Phase 6 deliverable. Both columns should be added together in Phase 6 when the re-send and reset-request flows are implemented.
+
+**Consequences:** Phase 2 has no protection against repeated verification token requests. This is acceptable for a demo environment. Phase 6 must add both `email_verification_sent_at` and `password_reset_sent_at` together, alongside the rate-limiting logic that uses them.
+
+---
+
 ## ADR-14 — Frontend Toolchain: npm + ESLint + Prettier + TypeScript Strict
 
 **Status:** Accepted

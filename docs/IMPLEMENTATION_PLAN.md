@@ -39,14 +39,27 @@ This document defines the implementation sequence in eight phases. Each phase ha
 **Goal:** Implement registration, login, logout, and the full JWT + refresh token lifecycle. This phase delivers the foundation of all subsequent security mechanisms.
 
 **Deliverables:**
-- `auth/service.py`: `register_user`, `login`, `logout` functions
 - `core/security.py`: Argon2 hashing, JWT creation/decoding, refresh token generation (raw + hash), password strength validation
+- Alembic migration 0003: adds exactly one new column to `users` — `email_verification_token_hash String(64) nullable` (see ADR-15)
+- `app/models/user.py`: add `email_verification_token_hash` field
+- `auth/service.py`: `register_user`, `login`, `refresh_tokens`, `logout` functions; lockout counter; audit log writes
 - `auth/router.py`: `POST /auth/register`, `POST /auth/login`, `POST /auth/refresh`, `POST /auth/logout`
-- Email verification token generation and validation (demo: console logging)
+- Email verification token generation and validation (demo: console logging marked `# DEMO MODE`)
 - `GET /auth/verify-email` endpoint
-- `dependencies/auth.py`: `get_current_user` dependency (token validation + blacklist check + session check + user state check)
-- Session creation in Redis on login
+- `dependencies/auth.py`: `get_current_user` dependency (signature → expiry → JTI blacklist → Redis session → user state, in that order)
+- Session creation in Redis on login keyed by `session:{session_id}`; TTL = refresh token lifetime
+- JTI blacklist in Redis on logout; TTL = remaining access token lifetime
 - Audit logging for: REGISTER, LOGIN_SUCCESS, LOGIN_FAILED, LOGOUT, EMAIL_VERIFIED
+
+**Implementation order:**
+
+1. `core/security.py` — all crypto primitives first; no FastAPI, no DB; fully unit-testable in isolation
+2. Migration 0003 — add `email_verification_token_hash` to `users` before any service code is written
+3. `register_user` + `POST /auth/register` + `GET /auth/verify-email` — DB only, no Redis
+4. `login` + `POST /auth/login` — introduces Redis session and JWT issuance; requires step 3
+5. `get_current_user` dependency — requires JWT decoding (step 1) and Redis (step 4)
+6. `logout` + `POST /auth/logout` — writes JTI to blacklist, revokes refresh token, deletes session
+7. `refresh_tokens` + `POST /auth/refresh` — rotation and reuse detection; most complex, done last
 
 **Dependencies:** Phase 1 (database, Redis, Alembic, models).
 
@@ -55,17 +68,35 @@ This document defines the implementation sequence in eight phases. Each phase ha
 - JWT contains only user ID, role, session ID — no PII (SR-06)
 - Access token TTL is 15 minutes (SR-06)
 - Refresh token stored as SHA-256 hash in DB (SR-07)
-- Logout blacklists access token and revokes refresh token (SR-09)
+- `get_current_user` validates signature before making any Redis lookup
+- Logout blacklists access token JTI with TTL = remaining lifetime, not fixed 15 minutes (SR-09)
 - Session created in Redis on login; verified on every request (SR-10)
+- Reuse detection revokes all tokens for the session, not just the presented token (SR-08)
+
+**Must NOT be implemented in Phase 2:**
+- MFA setup/enable/disable (`/auth/mfa/*`) — Phase 3
+- Step-up token issuance (`/auth/step-up`) — Phase 5
+- `require_role` and `require_verified` dependencies — Phase 4
+- Password change and password reset — Phase 6
+- `GET /users/me` — Phase 4
+- Account creation on registration — Phase 5
+- Application-layer rate limiting middleware — Phase 7
+- `SecurityEvent` rows for lockout — Phase 6 (increment `failed_login_count` and set `locked_until`, but do not write `SecurityEvent` rows)
 
 **Test goals:**
-- Registration with weak password → 422 (SR-01)
+- `core/security.py` unit: hash/verify round-trip; weak password rejects; JWT exp correct; expired JWT raises (T-19 partial)
+- Registration with weak password → 422 (T-19, SR-01)
 - Registration with valid password → 201 (SR-01)
 - Registration with duplicate email → 409 (SR-03)
-- Login with wrong password → 401 (SR-02)
+- Login with wrong password → 401 (T-01, SR-02)
 - Login with correct credentials → 200 + tokens (SR-06)
-- Using access token after logout → 401 (SR-09)
-- Using revoked refresh token → 401 (SR-07)
+- Login with locked account → 403 (SR-05)
+- `LOGIN_SUCCESS` audit log entry created (T-16, SR-16)
+- No Redis session → 401; blacklisted token → 401 (T-08)
+- Using access token after logout → 401 (T-07, SR-09)
+- `LOGOUT` audit log entry created (T-16, SR-16)
+- Old refresh token rejected after rotation (T-05, SR-07)
+- Revoked session rejected after reuse detection (T-08)
 
 ---
 
