@@ -293,6 +293,23 @@ The backend needs a dependency manager, a linting/style tool, and a test runner.
 
 ---
 
+## ADR-16 — sqlalchemy.JSON in ORM Models, JSONB in Migrations
+
+**Status:** Accepted
+
+**Context:**  
+`AuditLog.details` and `SecurityEvent.details` were originally defined using `sqlalchemy.dialects.postgresql.JSONB` directly in the ORM model classes. This caused `AttributeError: visit_JSONB` when SQLite (the in-memory test backend) attempted to compile the schema during test session setup, blocking all tests.
+
+**Decision:** ORM model definitions use `sqlalchemy.JSON` (the cross-dialect generic type). Alembic migration files may continue to use `postgresql.JSONB` for the PostgreSQL-specific column type.
+
+**Rationale:** SQLAlchemy's `JSON` type maps to `JSONB` on PostgreSQL and to `TEXT`/`JSON` on SQLite, providing the cross-dialect compatibility that the test suite requires. The Alembic migration is the correct place to assert the PostgreSQL-specific storage type — it runs only against PostgreSQL and benefits from JSONB's indexing and containment operators. Mixing dialect-specific types into ORM model definitions couples the model layer to a single database engine, which breaks test isolation.
+
+**Rule:** All ORM model files under `app/models/` must use `sqlalchemy.JSON` for JSON columns. Alembic migration files under `alembic/versions/` may use `postgresql.JSONB`.
+
+**Consequences:** No change to the production PostgreSQL schema — migrations still emit `JSONB`. The test suite can use SQLite without modification.
+
+---
+
 ## ADR-15 — email_verification_sent_at Deferred to Phase 6
 
 **Status:** Accepted
