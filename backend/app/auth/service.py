@@ -1,10 +1,10 @@
-"""Authentication service functions — registration, email verification, and login.
+"""Authentication service — registration, email verification, login, and logout.
 
 This module implements the core business logic for user registration, email
-address verification, and login with session creation.  It has no HTTP concerns:
-no Request or Response objects, no dependency injection containers.  All inputs
-are plain Python values; the caller (router) is responsible for extracting them
-from the HTTP layer.
+address verification, login with session creation, and logout with session
+teardown.  It has no HTTP concerns: no Request or Response objects, no
+dependency injection containers.  All inputs are plain Python values; the
+caller (router) is responsible for extracting them from the HTTP layer.
 
 Security properties enforced:
 - SR-01: Password strength validated via ``is_password_strong`` before hashing.
@@ -14,16 +14,16 @@ Security properties enforced:
 - SR-05: Account lockout after N consecutive failed login attempts.
 - SR-06: Access tokens are short-lived JWTs issued on successful login.
 - SR-07: Refresh tokens stored as SHA-256 hash; raw token returned to client once.
-- SR-10: Redis session created on login keyed by session_id.
+- SR-09: Access token JTI blacklisted in Redis on logout with remaining TTL.
+- SR-10: Redis session created on login keyed by session_id; deleted on logout.
 - SR-16: Audit log entries created for REGISTER, EMAIL_VERIFIED, LOGIN_SUCCESS,
-  and LOGIN_FAILED events.
+  LOGIN_FAILED, and LOGOUT events.
 """
 
 from __future__ import annotations
 
 import uuid
-from datetime import datetime as _dt
-from datetime import timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException
 from redis.asyncio import Redis
@@ -232,8 +232,8 @@ async def login(
             account (mfa_required signal to the client to supply a TOTP code).
     """
 
-    def _utcnow() -> _dt:
-        return _dt.now(timezone.utc)
+    def _utcnow() -> datetime:
+        return datetime.now(timezone.utc)
 
     # ------------------------------------------------------------------
     # Step 2: Fetch user by email.  If not found, run dummy hash to
@@ -366,3 +366,99 @@ async def login(
 
     # Step 16: Return tokens to the caller (router formats the HTTP response).
     return access_token, raw_refresh
+
+
+async def logout(
+    user: User,
+    raw_refresh_token: str,
+    access_token_payload: dict,
+    db: AsyncSession,
+    redis: Redis,  # type: ignore[type-arg]
+) -> None:
+    """Terminate the user's session, revoking both the access token and refresh token.
+
+    Enforces SR-09 (access token blacklisting on logout) and SR-10 (session
+    deletion from Redis).  Logout is idempotent for an already-expired access
+    token: if the token's remaining TTL is zero or negative, the JTI blacklist
+    step is skipped because the token can no longer be presented to any endpoint.
+
+    Operations performed, in order:
+    1. Blacklist the access token JTI in Redis with remaining TTL (SR-09).
+       Skipped if the token is already past its expiry.
+    2. Revoke the matching refresh token row in the database (SR-07).
+       If no unrevoked row is found (already revoked or never issued), the step
+       is skipped silently — the operation remains safe.
+    3. Delete the Redis session record (SR-10).
+    4. Write a LOGOUT audit log entry (SR-16).
+    5. Commit all database mutations atomically.
+
+    Args:
+        user:                 The authenticated User performing the logout.
+        raw_refresh_token:    The raw opaque refresh token supplied in the
+                              request body; hashed with SHA-256 for DB lookup.
+        access_token_payload: The decoded JWT payload dict from the current
+                              access token.  Must contain ``jti``, ``exp``, and
+                              ``session_id`` claims.
+        db:                   An async SQLAlchemy session for the current request.
+        redis:                The shared async Redis client.
+    """
+    # ------------------------------------------------------------------
+    # Step 1: Blacklist the access token JTI with remaining TTL (SR-09).
+    #
+    # The JTI blacklist ensures that a logout is effective immediately even
+    # though the access token's cryptographic signature remains valid until
+    # its natural expiry.  The Redis TTL is set to the remaining lifetime so
+    # the blacklist entry is automatically cleaned up once the token expires.
+    # ------------------------------------------------------------------
+    jti: str = access_token_payload["jti"]
+    exp: int = access_token_payload["exp"]
+    remaining_ttl = exp - int(datetime.now(timezone.utc).timestamp())
+    if remaining_ttl > 0:
+        await redis.setex(f"blacklist:{jti}", remaining_ttl, "1")
+
+    # ------------------------------------------------------------------
+    # Step 2: Revoke the refresh token in the database (SR-07).
+    #
+    # The raw token is hashed to look up the DB row.  The row is NOT deleted
+    # so that the audit trail is preserved (SR-16).  Setting revoked=True
+    # ensures the token cannot be used again.  If the row is not found (e.g.
+    # already revoked by a prior logout or rotation), we skip silently — the
+    # logout operation is still correct.
+    # ------------------------------------------------------------------
+    refresh_hash = hash_token(raw_refresh_token)
+    rt_result = await db.execute(
+        select(RefreshToken).where(
+            RefreshToken.token_hash == refresh_hash,
+            RefreshToken.revoked.is_(False),
+        )
+    )
+    refresh_token_row = rt_result.scalar_one_or_none()
+    if refresh_token_row is not None:
+        refresh_token_row.revoked = True
+
+    # ------------------------------------------------------------------
+    # Step 3: Delete the Redis session (SR-10).
+    #
+    # Removing the session record from Redis immediately invalidates any
+    # request that arrives after this point, even if it carries a still-valid
+    # JWT that was not yet caught by the JTI blacklist (e.g. a concurrent
+    # request that slipped through before the blacklist write).
+    # ------------------------------------------------------------------
+    session_id: str = access_token_payload["session_id"]
+    await redis.delete(f"session:{session_id}")
+
+    # ------------------------------------------------------------------
+    # Step 4: Write audit log entry for the LOGOUT event (SR-16).
+    # ------------------------------------------------------------------
+    audit = AuditLog(
+        user_id=user.id,
+        action="LOGOUT",
+        ip_address=None,
+        details={"session_id": session_id},
+    )
+    db.add(audit)
+
+    # ------------------------------------------------------------------
+    # Step 5: Commit all database mutations atomically.
+    # ------------------------------------------------------------------
+    await db.commit()

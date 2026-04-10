@@ -1,33 +1,41 @@
-"""Authentication router — registration, email verification, and login endpoints.
+"""Authentication router -- registration, email verification, login, and logout.
 
 Exposes:
-- POST /auth/register     — create a new user account (SR-01, SR-02, SR-03)
-- GET  /auth/verify-email — consume the email verification token (SR-03)
-- POST /auth/login        — authenticate and receive JWT + refresh token
-                            (SR-02, SR-05, SR-06, SR-07, SR-10, SR-16)
+- POST /auth/register     -- create a new user account (SR-01, SR-02, SR-03)
+- GET  /auth/verify-email -- consume the email verification token (SR-03)
+- POST /auth/login        -- authenticate and receive JWT + refresh token
+                             (SR-02, SR-05, SR-06, SR-07, SR-10, SR-16)
+- POST /auth/logout       -- terminate session, revoke tokens
+                             (SR-09, SR-10, SR-16)
 
 Route handlers are intentionally thin: they extract HTTP inputs, delegate all
 business logic to ``auth.service``, and format the response.  No security
 decisions are made here.
 
-Security note: all endpoints are unauthenticated by design (no
-``get_current_user`` dependency).  They are the entry points for account
-creation and authentication, and are intentionally public.  Rate limiting is
-enforced at the Nginx layer (SR-15).
+Security note: /register, /verify-email, and /login are unauthenticated by
+design -- they are the entry points for account creation and authentication.
+/logout requires a valid Bearer token via ``get_current_user``.  Rate limiting
+is enforced at the Nginx layer (SR-15).
 """
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from jwt import InvalidTokenError
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.service import login as login_service
+from app.auth.service import logout as logout_service
 from app.auth.service import register_user, verify_email
 from app.core.config import Settings, get_settings
 from app.core.database import get_db
 from app.core.redis import get_redis
-from app.schemas.auth import LoginRequest, TokenResponse
+from app.core.security import decode_access_token
+from app.dependencies.auth import get_current_user
+from app.models.user import User
+from app.schemas.auth import LoginRequest, LogoutRequest, TokenResponse
 from app.schemas.user import UserCreate, UserResponse
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -125,7 +133,7 @@ async def login(
 
     On success, returns a short-lived JWT access token (SR-06) and an opaque
     refresh token (SR-07).  The refresh token is stored in the DB as a
-    SHA-256 hash only — the raw value is returned here once and never persisted.
+    SHA-256 hash only -- the raw value is returned here once and never persisted.
 
     Args:
         body:     Validated ``LoginRequest`` payload (email + password; optional
@@ -155,3 +163,70 @@ async def login(
         refresh_token=raw_refresh,
         expires_in=settings.access_token_expire_minutes * 60,
     )
+
+
+@router.post(
+    "/logout",
+    status_code=status.HTTP_200_OK,
+    summary="Terminate the current session and revoke tokens",
+)
+async def logout(
+    body: LogoutRequest,
+    current_user: User = Depends(get_current_user),
+    credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer()),
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),  # type: ignore[type-arg]
+    settings: Settings = Depends(get_settings),
+) -> dict[str, str]:
+    """Terminate the authenticated user's session and revoke both tokens.
+
+    Blacklists the access token JTI in Redis (SR-09), revokes the refresh
+    token in the database (SR-07), deletes the Redis session record (SR-10),
+    and writes a LOGOUT audit log entry (SR-16).
+
+    The access token is supplied via the ``Authorization: Bearer`` header and
+    is validated by both ``get_current_user`` and a second
+    ``decode_access_token`` call to extract the raw payload (JTI and
+    session_id) needed for revocation.  The double decode is safe and correct
+    -- both calls validate against the same signing key and the overhead is
+    negligible.
+
+    The refresh token is supplied in the request body and is revoked by its
+    SHA-256 hash.  If it is already revoked (e.g. from a prior logout or
+    rotation), the step is skipped silently.
+
+    Args:
+        body:         Validated ``LogoutRequest`` containing the raw refresh token.
+        current_user: Authenticated User provided by ``get_current_user``.
+        credentials:  Raw Bearer credentials extracted by ``HTTPBearer``.
+        db:           Injected async database session.
+        redis:        Injected Redis client for blacklist and session operations.
+        settings:     Injected application settings (signing key, algorithm).
+
+    Returns:
+        A success message dict with HTTP 200.
+
+    Raises:
+        HTTPException 401: Token invalid, expired, revoked, or session gone.
+        HTTPException 403: Authorization header absent (HTTPBearer behaviour).
+    """
+    # Decode the access token a second time to obtain the raw payload dict.
+    # get_current_user already validated the token; this call is guaranteed to
+    # succeed because the same token just passed the dependency.  We need the
+    # payload directly (jti, exp, session_id) for the revocation operations.
+    try:
+        payload = decode_access_token(credentials.credentials, settings)
+    except InvalidTokenError as exc:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or expired token",
+        ) from exc
+
+    await logout_service(
+        user=current_user,
+        raw_refresh_token=body.refresh_token,
+        access_token_payload=payload,
+        db=db,
+        redis=redis,
+    )
+    return {"message": "Logged out successfully."}
