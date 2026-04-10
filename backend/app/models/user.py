@@ -120,6 +120,15 @@ class User(Base):
         default=None,
     )
 
+    # SHA-256 hash of the one-time email verification token (SR-03).
+    # The raw token is logged to console in demo mode; only the hash is stored.
+    # Set to None after successful verification.
+    email_verification_token_hash: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        default=None,
+    )
+
     # Audit timestamps.
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
