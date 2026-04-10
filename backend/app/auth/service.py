@@ -265,7 +265,7 @@ async def login(
                 details={"reason": "user_not_found"},
             )
         )
-        await db.flush()
+        await db.commit()
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     # ------------------------------------------------------------------

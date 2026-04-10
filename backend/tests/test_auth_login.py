@@ -329,13 +329,22 @@ async def test_login_failed_audit_log_unknown_email(
             AuditLog.user_id.is_(None),
         )
     )
-    log_entry = result.scalar_one_or_none()
+    # Multiple user_id=None LOGIN_FAILED rows may exist across tests; find the
+    # one written by this test by matching on the reason detail.
+    all_entries = result.scalars().all()
+    log_entry = next(
+        (
+            e
+            for e in all_entries
+            if e.details and e.details.get("reason") == "user_not_found"
+        ),
+        None,
+    )
 
     assert (
         log_entry is not None
     ), "Expected a LOGIN_FAILED audit log entry for unknown email"
     assert log_entry.user_id is None
-    assert log_entry.details is not None
     assert log_entry.details.get("reason") == "user_not_found"
 
 
