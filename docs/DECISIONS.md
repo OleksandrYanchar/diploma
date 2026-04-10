@@ -293,6 +293,21 @@ The backend needs a dependency manager, a linting/style tool, and a test runner.
 
 ---
 
+## ADR-15 — email_verification_sent_at Deferred to Phase 6
+
+**Status:** Accepted
+
+**Context:**  
+The Phase 2 email verification flow stores a SHA-256-hashed verification token in `email_verification_token_hash` on the `User` row. A second column, `email_verification_sent_at`, was considered for Phase 2 to support re-send rate limiting (prevent a user from requesting a new verification email on every request).
+
+**Decision:** `email_verification_sent_at` is not added in Phase 2. Migration 0003 adds exactly one column: `email_verification_token_hash String(64) nullable`.
+
+**Rationale:** SR-03 requires email verification but does not specify a re-send rate limit. The Phase 2 API scope does not include a re-send endpoint. Adding `email_verification_sent_at` now would be speculative — it anticipates a feature that has no corresponding endpoint, test, or requirement in Phase 2. The column follows the same pattern as the password reset token timestamp (`password_reset_sent_at`), which is a Phase 6 deliverable. Both columns should be added together in Phase 6 when the re-send and reset-request flows are implemented.
+
+**Consequences:** Phase 2 has no protection against repeated verification token requests. This is acceptable for a demo environment. Phase 6 must add both `email_verification_sent_at` and `password_reset_sent_at` together, alongside the rate-limiting logic that uses them.
+
+---
+
 ## ADR-14 — Frontend Toolchain: npm + ESLint + Prettier + TypeScript Strict
 
 **Status:** Accepted
