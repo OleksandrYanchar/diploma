@@ -1,10 +1,12 @@
-"""Authentication router -- registration, email verification, login, and logout.
+"""Authentication router — registration, verification, login, refresh, and logout.
 
 Exposes:
 - POST /auth/register     -- create a new user account (SR-01, SR-02, SR-03)
 - GET  /auth/verify-email -- consume the email verification token (SR-03)
 - POST /auth/login        -- authenticate and receive JWT + refresh token
                              (SR-02, SR-05, SR-06, SR-07, SR-10, SR-16)
+- POST /auth/refresh      -- rotate refresh token and issue new access token
+                             (SR-07, SR-08, SR-10, SR-16)
 - POST /auth/logout       -- terminate session, revoke tokens
                              (SR-09, SR-10, SR-16)
 
@@ -12,10 +14,10 @@ Route handlers are intentionally thin: they extract HTTP inputs, delegate all
 business logic to ``auth.service``, and format the response.  No security
 decisions are made here.
 
-Security note: /register, /verify-email, and /login are unauthenticated by
-design -- they are the entry points for account creation and authentication.
-/logout requires a valid Bearer token via ``get_current_user``.  Rate limiting
-is enforced at the Nginx layer (SR-15).
+Security note: /register, /verify-email, /login, and /refresh are unauthenticated
+by design -- /refresh accepts an expired access token intentionally, so it cannot
+require a valid Bearer credential.  /logout requires a valid Bearer token via
+``get_current_user``.  Rate limiting is enforced at the Nginx layer (SR-15).
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.service import login as login_service
 from app.auth.service import logout as logout_service
+from app.auth.service import refresh_tokens as refresh_tokens_service
 from app.auth.service import register_user, verify_email
 from app.core.config import Settings, get_settings
 from app.core.database import get_db
@@ -35,7 +38,7 @@ from app.core.redis import get_redis
 from app.core.security import decode_access_token
 from app.dependencies.auth import get_current_user
 from app.models.user import User
-from app.schemas.auth import LoginRequest, LogoutRequest, TokenResponse
+from app.schemas.auth import LoginRequest, LogoutRequest, RefreshRequest, TokenResponse
 from app.schemas.user import UserCreate, UserResponse
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -161,6 +164,61 @@ async def login(
     return TokenResponse(
         access_token=access_token,
         refresh_token=raw_refresh,
+        expires_in=settings.access_token_expire_minutes * 60,
+    )
+
+
+@router.post(
+    "/refresh",
+    response_model=TokenResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Rotate refresh token and issue a new access + refresh token pair",
+)
+async def refresh(
+    body: RefreshRequest,
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),  # type: ignore[type-arg]
+    settings: Settings = Depends(get_settings),
+) -> TokenResponse:
+    """Rotate the client's refresh token and issue a new token pair.
+
+    This endpoint is intentionally unauthenticated: its entire purpose is to
+    renew an expired or expiring access token.  The access token is NOT required
+    in the Authorization header here — the refresh token in the request body is
+    the sole credential.
+
+    The service layer enforces:
+    - SR-07: The old refresh token is marked revoked immediately on use.  A new
+      opaque refresh token with a fresh session_id replaces it.
+    - SR-08: If the presented refresh token is already revoked, the Redis session
+      for that token's session_id is destroyed before the 401 is returned.  This
+      ensures that a token-theft scenario cannot be exploited silently.
+    - SR-10: The Redis session is rotated to a new session_id on every successful
+      refresh.  The old session key is deleted.
+    - SR-16: A TOKEN_REFRESHED audit log entry is written on success.
+
+    Args:
+        body:     Validated ``RefreshRequest`` containing the raw refresh token.
+        db:       Injected async database session.
+        redis:    Injected Redis client for session management.
+        settings: Injected application settings (signing key, token lifetimes).
+
+    Returns:
+        A ``TokenResponse`` with a new ``access_token``, new ``refresh_token``,
+        ``token_type="bearer"``, and ``expires_in`` (seconds).
+
+    Raises:
+        HTTPException 401: Token not found, already used (SR-08), or expired.
+    """
+    new_access_token, new_raw_refresh = await refresh_tokens_service(
+        raw_refresh_token=body.refresh_token,
+        db=db,
+        redis=redis,
+        settings=settings,
+    )
+    return TokenResponse(
+        access_token=new_access_token,
+        refresh_token=new_raw_refresh,
         expires_in=settings.access_token_expire_minutes * 60,
     )
 

@@ -1,10 +1,11 @@
-"""Authentication service — registration, email verification, login, and logout.
+"""Authentication service — registration, verification, login, refresh, and logout.
 
 This module implements the core business logic for user registration, email
-address verification, login with session creation, and logout with session
-teardown.  It has no HTTP concerns: no Request or Response objects, no
-dependency injection containers.  All inputs are plain Python values; the
-caller (router) is responsible for extracting them from the HTTP layer.
+address verification, login with session creation, logout with session
+teardown, and refresh token rotation with reuse detection.  It has no HTTP
+concerns: no Request or Response objects, no dependency injection containers.
+All inputs are plain Python values; the caller (router) is responsible for
+extracting them from the HTTP layer.
 
 Security properties enforced:
 - SR-01: Password strength validated via ``is_password_strong`` before hashing.
@@ -14,10 +15,13 @@ Security properties enforced:
 - SR-05: Account lockout after N consecutive failed login attempts.
 - SR-06: Access tokens are short-lived JWTs issued on successful login.
 - SR-07: Refresh tokens stored as SHA-256 hash; raw token returned to client once.
+- SR-08: Refresh token reuse detection: a second presentation of an already-rotated
+  token destroys the entire Redis session, forcing full re-authentication.
 - SR-09: Access token JTI blacklisted in Redis on logout with remaining TTL.
-- SR-10: Redis session created on login keyed by session_id; deleted on logout.
+- SR-10: Redis session created on login keyed by session_id; deleted on logout or
+  on reuse detection.
 - SR-16: Audit log entries created for REGISTER, EMAIL_VERIFIED, LOGIN_SUCCESS,
-  LOGIN_FAILED, and LOGOUT events.
+  LOGIN_FAILED, LOGOUT, and TOKEN_REFRESHED events.
 """
 
 from __future__ import annotations
@@ -366,6 +370,200 @@ async def login(
 
     # Step 16: Return tokens to the caller (router formats the HTTP response).
     return access_token, raw_refresh
+
+
+async def refresh_tokens(
+    raw_refresh_token: str,
+    db: AsyncSession,
+    redis: Redis,  # type: ignore[type-arg]
+    settings: Settings,
+) -> tuple[str, str]:
+    """Rotate a refresh token and issue a new access token + refresh token pair.
+
+    Enforces SR-07 (single-use refresh token rotation), SR-08 (reuse detection
+    with full session revocation), SR-10 (session ID rotation in Redis), and
+    SR-16 (audit log on TOKEN_REFRESHED event).
+
+    Algorithm:
+    1. Hash the incoming raw token and look up the RefreshToken row.
+    2. If not found, raise 401 (invalid token).
+    3. If ``revoked == True``, the token was already consumed or explicitly
+       revoked.  Per SR-08, the Redis session for the associated session_id is
+       deleted immediately before raising 401 so that even the legitimate client
+       (whose new tokens reference the rotated session) is forced to
+       re-authenticate.  This prevents a silent attacker who captured a
+       pre-rotation token from maintaining access after the victim rotates.
+    4. If ``expires_at`` is in the past, raise 401 (expired).
+    5. Verify the associated user is still active.
+    6. Mark the old token row as revoked (consumed by rotation).
+    7. Generate a new refresh token and a new session_id (session rotation).
+    8. Insert a new RefreshToken row with the new hash and new session_id.
+    9. Issue a new access token bound to the new session_id.
+    10. Update Redis: delete the old session key, set the new session key.
+    11. Write a TOKEN_REFRESHED audit log entry (SR-16).
+    12. Return (new_access_token, new_raw_refresh_token).
+
+    Args:
+        raw_refresh_token: The opaque refresh token received from the client.
+        db:                An async SQLAlchemy session for the current request.
+        redis:             The shared async Redis client for session storage.
+        settings:          Application settings supplying token lifetimes and
+                           signing key.
+
+    Returns:
+        A 2-tuple ``(new_access_token, new_raw_refresh_token)``.  Both must be
+        returned to the client; the refresh token is never re-readable from the
+        server side.
+
+    Raises:
+        HTTPException 401: Token not found, already used (reuse detection), or
+            expired.  Also raised if the associated user is not found or not
+            active.
+    """
+
+    def _utcnow() -> datetime:
+        return datetime.now(timezone.utc)
+
+    # ------------------------------------------------------------------
+    # Step 1: Hash the incoming token and look up the DB row.
+    # ------------------------------------------------------------------
+    token_hash = hash_token(raw_refresh_token)
+    rt_result = await db.execute(
+        select(RefreshToken).where(RefreshToken.token_hash == token_hash)
+    )
+    token_row = rt_result.scalar_one_or_none()
+
+    # ------------------------------------------------------------------
+    # Step 2: Not found → invalid token.
+    # ------------------------------------------------------------------
+    if token_row is None:
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
+
+    # ------------------------------------------------------------------
+    # Step 3: Reuse detection (SR-08).
+    #
+    # A revoked token arriving here means either:
+    # a) The legitimate client is replaying an old token (bug or race), or
+    # b) An attacker captured a pre-rotation token and is replaying it.
+    #
+    # In both cases the correct response is to destroy every active session
+    # for this user so that neither the legitimate client nor an attacker can
+    # continue using any existing credentials.  The legitimate client will
+    # receive 401 on their next request and must re-authenticate, which is the
+    # correct outcome — the credential theft window is fully closed.
+    #
+    # We cannot only delete the old session (token_row.session_id): after a
+    # successful prior rotation the old session no longer exists in Redis.  The
+    # live session belongs to the *successor* refresh token row.  Instead we
+    # delete all ``session:{session_id}`` keys for every refresh token row
+    # belonging to this user, regardless of revocation state.  This covers
+    # both the original session and any sessions established by subsequent
+    # rotations.
+    # ------------------------------------------------------------------
+    if token_row.revoked:
+        user_rt_result = await db.execute(
+            select(RefreshToken).where(RefreshToken.user_id == token_row.user_id)
+        )
+        all_user_tokens = user_rt_result.scalars().all()
+        session_keys = [f"session:{rt.session_id}" for rt in all_user_tokens]
+        if session_keys:
+            await redis.delete(*session_keys)
+        raise HTTPException(
+            status_code=401,
+            detail="Refresh token already used",
+        )
+
+    # ------------------------------------------------------------------
+    # Step 4: Expiry check (ADR-17: normalize naive datetimes from SQLite).
+    # ------------------------------------------------------------------
+    expires_at = token_row.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at < _utcnow():
+        raise HTTPException(status_code=401, detail="Refresh token expired")
+
+    # ------------------------------------------------------------------
+    # Step 5: Load and validate the associated user.
+    # ------------------------------------------------------------------
+    user_result = await db.execute(
+        select(User).where(User.id == uuid.UUID(str(token_row.user_id)))
+    )
+    user = user_result.scalar_one_or_none()
+    if user is None or not user.is_active:
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
+
+    # ------------------------------------------------------------------
+    # Step 6: Mark the old token row as revoked (consumed by rotation).
+    # ------------------------------------------------------------------
+    old_session_id = str(token_row.session_id)
+    token_row.revoked = True
+
+    # ------------------------------------------------------------------
+    # Step 7: Generate new credentials with a fresh session ID.
+    #
+    # Rotating the session_id on every refresh ensures that a stolen old
+    # access token (still within its short lifetime) cannot be associated
+    # with the newly rotated session — the new session_id must match the
+    # Redis key, so the old access token is automatically invalidated at
+    # the next get_current_user check.
+    # ------------------------------------------------------------------
+    new_raw_refresh = generate_refresh_token()
+    new_session_id = str(uuid.uuid4())
+
+    # ------------------------------------------------------------------
+    # Step 8: Persist the new RefreshToken row.
+    # ------------------------------------------------------------------
+    new_expires_at = _utcnow() + timedelta(days=settings.refresh_token_expire_days)
+    new_token_row = RefreshToken(
+        user_id=user.id,
+        token_hash=hash_token(new_raw_refresh),
+        session_id=uuid.UUID(new_session_id),
+        expires_at=new_expires_at,
+    )
+    db.add(new_token_row)
+
+    # ------------------------------------------------------------------
+    # Step 9: Issue the new access token bound to the new session.
+    # ------------------------------------------------------------------
+    new_access_token = create_access_token(
+        subject=str(user.id),
+        role=user.role.value,
+        session_id=new_session_id,
+        settings=settings,
+    )
+
+    # ------------------------------------------------------------------
+    # Step 10: Rotate the Redis session (SR-10).
+    #
+    # Delete the old session key first so there is no window where both the
+    # old and new session are simultaneously live.  Then set the new key with
+    # a fresh TTL matching the new refresh token lifetime.
+    # ------------------------------------------------------------------
+    session_ttl_seconds = settings.refresh_token_expire_days * 86400
+    await redis.delete(f"session:{old_session_id}")
+    await redis.set(
+        f"session:{new_session_id}",
+        str(user.id),
+        ex=session_ttl_seconds,
+    )
+
+    # ------------------------------------------------------------------
+    # Step 11: Audit log entry for the TOKEN_REFRESHED event (SR-16).
+    # ------------------------------------------------------------------
+    audit = AuditLog(
+        user_id=user.id,
+        action="TOKEN_REFRESHED",
+        ip_address=None,
+        details={"session_id": new_session_id},
+    )
+    db.add(audit)
+
+    # ------------------------------------------------------------------
+    # Step 12: Commit all DB mutations atomically.
+    # ------------------------------------------------------------------
+    await db.commit()
+
+    return new_access_token, new_raw_refresh
 
 
 async def logout(
