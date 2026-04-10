@@ -293,6 +293,41 @@ The backend needs a dependency manager, a linting/style tool, and a test runner.
 
 ---
 
+## ADR-17 — SQLite Naive Datetime Normalisation in Tests
+
+**Status:** Accepted
+
+**Context:**  
+`DateTime(timezone=True)` columns return timezone-aware `datetime` objects from PostgreSQL but naive (no `tzinfo`) objects from SQLite/aiosqlite. Comparing a naive `locked_until` value from SQLite against `datetime.now(timezone.utc)` raises `TypeError: can't compare offset-naive and offset-aware datetimes`, causing lockout checks to fail in the test environment only.
+
+**Decision:** Normalise `locked_until` at comparison time in service code: if `locked_until.tzinfo is None`, attach `timezone.utc` before comparing. This branch is never taken against PostgreSQL (which always returns timezone-aware values) and has no production impact.
+
+**Rule:** Any service code that compares a `DateTime(timezone=True)` ORM field against a timezone-aware `datetime` must guard against naive values using this pattern:
+```python
+from datetime import timezone
+if dt.tzinfo is None:
+    dt = dt.replace(tzinfo=timezone.utc)
+```
+
+**Consequences:** Tests pass on SQLite and behaviour on PostgreSQL is identical.
+
+---
+
+## ADR-18 — Audit Log Test Queries Scoped by action + user_id
+
+**Status:** Accepted
+
+**Context:**  
+The SQLite in-memory engine is shared across all tests within a session (by design — schema creation is session-scoped for speed). Committed `AuditLog` rows from earlier tests accumulate. Querying by `action` alone causes `MultipleResultsFound` once several tests have written the same action string (e.g. `"LOGIN_FAILED"`).
+
+**Decision:** All audit log assertions in tests must filter by both `action` and `user_id`. `user_id` is taken from the registration response in each test, ensuring each assertion is scoped to the specific test's user.
+
+**Rule:** Never query `AuditLog` by `action` alone in tests. Always add `AuditLog.user_id == user_id` to the filter.
+
+**Consequences:** Test queries are slightly more verbose but resilient to execution order and accumulated state.
+
+---
+
 ## ADR-16 — sqlalchemy.JSON in ORM Models, JSONB in Migrations
 
 **Status:** Accepted
