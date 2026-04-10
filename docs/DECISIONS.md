@@ -311,6 +311,9 @@ if dt.tzinfo is None:
 
 **Consequences:** Tests pass on SQLite and behaviour on PostgreSQL is identical.
 
+**Addendum — UUID coercion (same class of issue):**  
+SQLite/aiosqlite also raises `StatementError` when a plain string is bound to a `UUID(as_uuid=True)` column in a `WHERE` clause. The JWT `sub` claim is a string; `User.id` is `UUID`. Fix: convert with `uuid.UUID(user_id)` before the query. A `ValueError` on a malformed claim is caught and converted to HTTP 401. PostgreSQL accepts both forms natively.
+
 ---
 
 ## ADR-18 — Audit Log Test Queries Scoped by action + user_id
