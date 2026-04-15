@@ -13,6 +13,8 @@ Exposes:
                              (SR-04, SR-16)
 - POST /auth/mfa/enable   -- confirm TOTP code and activate the MFA gate
                              (SR-04, SR-16)
+- POST /auth/mfa/disable  -- deactivate the MFA gate after verifying password + TOTP
+                             (SR-04, SR-16)
 
 Route handlers are intentionally thin: they extract HTTP inputs, delegate all
 business logic to ``auth.service``, and format the response.  No security
@@ -20,9 +22,9 @@ decisions are made here.
 
 Security note: /register, /verify-email, /login, and /refresh are unauthenticated
 by design -- /refresh accepts an expired access token intentionally, so it cannot
-require a valid Bearer credential.  /logout, /mfa/setup, and /mfa/enable require a
-valid Bearer token via ``get_current_user``.  Rate limiting is enforced at the
-Nginx layer (SR-15).
+require a valid Bearer credential.  /logout, /mfa/setup, /mfa/enable, and
+/mfa/disable require a valid Bearer token via ``get_current_user``.  Rate limiting
+is enforced at the Nginx layer (SR-15).
 """
 
 from __future__ import annotations
@@ -33,7 +35,13 @@ from jwt import InvalidTokenError
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.service import enable_mfa, register_user, setup_mfa, verify_email
+from app.auth.service import (
+    disable_mfa,
+    enable_mfa,
+    register_user,
+    setup_mfa,
+    verify_email,
+)
 from app.auth.service import login as login_service
 from app.auth.service import logout as logout_service
 from app.auth.service import refresh_tokens as refresh_tokens_service
@@ -46,6 +54,7 @@ from app.models.user import User
 from app.schemas.auth import (
     LoginRequest,
     LogoutRequest,
+    MFADisableRequest,
     MFAEnableRequest,
     MFARequiredResponse,
     MFASetupResponse,
@@ -415,3 +424,48 @@ async def mfa_enable(
         db=db,
     )
     return {"detail": "MFA enabled successfully"}
+
+
+@router.post(
+    "/mfa/disable",
+    status_code=status.HTTP_200_OK,
+    summary="Disable MFA after verifying password and current TOTP code",
+)
+async def mfa_disable(
+    body: MFADisableRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, str]:
+    """Deactivate the MFA gate on the authenticated account.
+
+    Requires both the account password and a current valid TOTP code to
+    prevent an attacker who holds a stolen access token from silently
+    disabling MFA (SR-04).
+
+    On success, ``user.mfa_enabled`` is set to False, ``user.mfa_secret``
+    is cleared, and an MFA_DISABLED audit log entry is written (SR-16).
+
+    On an invalid TOTP code, an MFA_FAILED audit log entry is committed
+    before the 401 is returned (SR-16).
+
+    Args:
+        body:         Validated ``MFADisableRequest`` (password + totp_code).
+        current_user: Authenticated User provided by ``get_current_user``.
+        db:           Injected async database session.
+
+    Returns:
+        A success message dict with HTTP 200.
+
+    Raises:
+        HTTPException 400: MFA is not currently enabled on this account.
+        HTTPException 401: Password is incorrect.
+        HTTPException 401: TOTP code is invalid (MFA_FAILED audit log written).
+        HTTPException 403: Authorization header absent (HTTPBearer behaviour).
+    """
+    await disable_mfa(
+        user=current_user,
+        password=body.password,
+        totp_code=body.totp_code,
+        db=db,
+    )
+    return {"detail": "MFA disabled successfully"}

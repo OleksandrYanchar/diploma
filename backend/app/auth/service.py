@@ -740,6 +740,102 @@ async def logout(
     await db.commit()
 
 
+async def disable_mfa(
+    user: User,
+    password: str,
+    totp_code: str,
+    db: AsyncSession,
+) -> None:
+    """Disable MFA for the user after verifying both password and current TOTP code.
+
+    Enforces SR-04 (TOTP gate deactivation requires confirmed identity) and
+    SR-16 (audit log on MFA_FAILED and MFA_DISABLED events).
+
+    The two-factor check (password + TOTP) prevents an attacker who has only
+    stolen a valid access token from silently disabling the MFA gate.  Both
+    factors must be correct before the gate is deactivated.
+
+    The MFA_FAILED audit log entry is committed BEFORE raising the
+    HTTPException so that the failure event is always persisted regardless
+    of any exception handling above this call site.  This matches the pattern
+    used by the login and enable_mfa failure paths (SR-16).
+
+    Args:
+        user:      The authenticated User requesting MFA deactivation.
+        password:  The plaintext password to verify against the stored hash.
+        totp_code: The six-to-eight-digit TOTP code to verify against the
+                   stored secret.
+        db:        An async SQLAlchemy session for the current request.
+
+    Raises:
+        HTTPException 400: If MFA is not currently enabled on the account.
+        HTTPException 401: If the password is incorrect.
+        HTTPException 401: If the supplied TOTP code is invalid, with a
+            MFA_FAILED audit log entry committed before raising.
+    """
+    # ------------------------------------------------------------------
+    # Step 1: Reject if MFA is not currently active.
+    # There is nothing to disable on an account that has not enrolled.
+    # ------------------------------------------------------------------
+    if not user.mfa_enabled:
+        raise HTTPException(
+            status_code=400,
+            detail="MFA is not enabled",
+        )
+
+    # ------------------------------------------------------------------
+    # Step 2: Verify the supplied password.
+    # This prevents an attacker who holds a stolen access token from
+    # silently disabling MFA without knowing the account password.
+    # No audit log is written here — password failure is an immediate
+    # rejection that does not require a persistent audit record for the
+    # disable flow (only TOTP failures are audited in this operation).
+    # ------------------------------------------------------------------
+    if not verify_password(password, user.hashed_password):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid credentials",
+        )
+
+    # ------------------------------------------------------------------
+    # Step 3: Verify the TOTP code.
+    # On failure: commit the audit entry BEFORE raising so the event is
+    # always persisted (SR-16), matching the pattern used in enable_mfa
+    # and in the login MFA gate.
+    # ------------------------------------------------------------------
+    if not verify_totp_code(user.mfa_secret, totp_code):
+        db.add(
+            AuditLog(
+                user_id=user.id,
+                action="MFA_FAILED",
+                ip_address=None,
+                details={"reason": "invalid_totp_code"},
+            )
+        )
+        await db.commit()
+        raise HTTPException(status_code=401, detail="Invalid TOTP code")
+
+    # ------------------------------------------------------------------
+    # Step 4: Deactivate the MFA gate and clear the stored secret.
+    # Both mutations and the success audit entry are committed atomically
+    # so that the user state and the audit record are always consistent
+    # (SR-04, SR-16).
+    # ------------------------------------------------------------------
+    user.mfa_enabled = False
+    user.mfa_secret = None
+
+    db.add(
+        AuditLog(
+            user_id=user.id,
+            action="MFA_DISABLED",
+            ip_address=None,
+            details={"email": user.email},
+        )
+    )
+
+    await db.commit()
+
+
 async def setup_mfa(
     user: User,
     db: AsyncSession,

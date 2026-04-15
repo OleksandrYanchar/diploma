@@ -1,5 +1,6 @@
 """Tests for MFA endpoints: POST /auth/mfa/setup (Phase 3 Step 2),
-POST /auth/mfa/enable (Phase 3 Step 3), and the MFA login gate (Phase 3 Step 4).
+POST /auth/mfa/enable (Phase 3 Step 3), the MFA login gate (Phase 3 Step 4),
+and POST /auth/mfa/disable (Phase 3 Step 5).
 
 Step 2 coverage:
 - Authenticated user calls setup → 200 with secret and QR code (SR-04, SR-16)
@@ -17,6 +18,15 @@ Step 3 coverage:
 - Enable without prior setup → 400 (SR-04)
 - Enable when already enabled → 400 (SR-04)
 - Unauthenticated call → 403 (HTTPBearer behaviour)
+
+Step 5 coverage (POST /auth/mfa/disable):
+- Correct password + valid TOTP → 200; mfa_enabled False in DB; mfa_secret None;
+  MFA_DISABLED audit
+- Wrong password → 401; mfa_enabled still True in DB
+- Valid password + wrong TOTP → 401; mfa_enabled still True; MFA_FAILED audit log
+- Disable when MFA not enabled → 400
+- Unauthenticated call → 403
+- After disabling, login no longer requires TOTP (regression guard)
 
 Step 4 coverage (MFA gate at login):
 - MFA user, no totp_code → HTTP 200, mfa_required=True, no access_token (T-03)
@@ -53,6 +63,7 @@ _VERIFY_URL = "/api/v1/auth/verify-email"
 _LOGIN_URL = "/api/v1/auth/login"
 _MFA_SETUP_URL = "/api/v1/auth/mfa/setup"
 _MFA_ENABLE_URL = "/api/v1/auth/mfa/enable"
+_MFA_DISABLE_URL = "/api/v1/auth/mfa/disable"
 
 # ---------------------------------------------------------------------------
 # URL constants — Step 4
@@ -738,3 +749,266 @@ async def test_login_without_mfa_still_works_after_step4(
     assert "access_token" in data, "Non-MFA login must return access_token"
     assert "refresh_token" in data, "Non-MFA login must return refresh_token"
     assert data.get("token_type") == "bearer"
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 Step 5: POST /auth/mfa/disable tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_mfa_disable_correct_password_and_valid_totp_returns_200(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Correct password + valid TOTP → 200; mfa_enabled False; mfa_secret None;
+    MFA_DISABLED audit.
+
+    Full happy-path test for SR-04 deactivation:
+    1. Full enrollment flow produces an account with mfa_enabled=True.
+    2. POST /auth/mfa/disable with correct password and a fresh TOTP code succeeds.
+    3. The DB row has mfa_enabled=False and mfa_secret=None.
+    4. An MFA_DISABLED audit log entry is committed (SR-16).
+    """
+    email = "mfa_disable_ok@example.com"
+    user_id, secret = await _register_verify_login_and_enable_mfa(
+        async_client, capsys, email
+    )
+
+    # Re-login to obtain a fresh access token after MFA was enabled.
+    valid_login_code = pyotp.TOTP(secret).now()
+    login_resp = await async_client.post(
+        _LOGIN_URL,
+        json={
+            "email": email,
+            "password": _STRONG_PASSWORD,
+            "totp_code": valid_login_code,
+        },
+    )
+    assert login_resp.status_code == 200
+    access_token: str = login_resp.json()["access_token"]
+
+    valid_disable_code = pyotp.TOTP(secret).now()
+    response = await async_client.post(
+        _MFA_DISABLE_URL,
+        json={"password": _STRONG_PASSWORD, "totp_code": valid_disable_code},
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+
+    assert response.status_code == 200
+    assert response.json().get("detail") == "MFA disabled successfully"
+
+    # DB: mfa_enabled must be False and mfa_secret must be cleared.
+    result = await db_session.execute(select(User).where(User.id == uuid.UUID(user_id)))
+    user: User | None = result.scalar_one_or_none()
+    assert user is not None
+    assert user.mfa_enabled is False, "mfa_enabled must be False after disable"
+    assert user.mfa_secret is None, "mfa_secret must be cleared after disable"
+
+    # Audit: an MFA_DISABLED log entry must exist for this user.
+    audit_result = await db_session.execute(
+        select(AuditLog).where(
+            AuditLog.action == "MFA_DISABLED",
+            AuditLog.user_id == uuid.UUID(user_id),
+        )
+    )
+    log_entry: AuditLog | None = audit_result.scalar_one_or_none()
+    assert log_entry is not None, "Expected an MFA_DISABLED audit log entry"
+
+
+@pytest.mark.asyncio
+async def test_mfa_disable_wrong_password_returns_401(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Wrong password → 401; mfa_enabled remains True in DB.
+
+    An incorrect password must be rejected immediately (SR-04).  The MFA gate
+    must remain active — a failed password check must not alter user state.
+    """
+    email = "mfa_disable_bad_pw@example.com"
+    user_id, secret = await _register_verify_login_and_enable_mfa(
+        async_client, capsys, email
+    )
+
+    # Re-login with valid TOTP to get a fresh token.
+    valid_login_code = pyotp.TOTP(secret).now()
+    login_resp = await async_client.post(
+        _LOGIN_URL,
+        json={
+            "email": email,
+            "password": _STRONG_PASSWORD,
+            "totp_code": valid_login_code,
+        },
+    )
+    assert login_resp.status_code == 200
+    access_token: str = login_resp.json()["access_token"]
+
+    valid_code = pyotp.TOTP(secret).now()
+    response = await async_client.post(
+        _MFA_DISABLE_URL,
+        json={"password": "WrongPassword99!", "totp_code": valid_code},
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+
+    assert response.status_code == 401
+
+    # mfa_enabled must remain True — the gate must not deactivate on wrong password.
+    result = await db_session.execute(select(User).where(User.id == uuid.UUID(user_id)))
+    user: User | None = result.scalar_one_or_none()
+    assert user is not None
+    assert user.mfa_enabled is True, "mfa_enabled must remain True after wrong password"
+
+
+@pytest.mark.asyncio
+async def test_mfa_disable_bad_totp_returns_401_and_writes_mfa_failed_audit(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Valid password + wrong TOTP → 401; mfa_enabled still True; MFA_FAILED audit.
+
+    An invalid TOTP code must be rejected and a MFA_FAILED audit log entry
+    must be committed BEFORE the 401 is returned (SR-04, SR-16).  The gate
+    must remain active.
+    """
+    email = "mfa_disable_bad_totp@example.com"
+    user_id, secret = await _register_verify_login_and_enable_mfa(
+        async_client, capsys, email
+    )
+
+    # Re-login with valid TOTP to get a fresh token.
+    valid_login_code = pyotp.TOTP(secret).now()
+    login_resp = await async_client.post(
+        _LOGIN_URL,
+        json={
+            "email": email,
+            "password": _STRONG_PASSWORD,
+            "totp_code": valid_login_code,
+        },
+    )
+    assert login_resp.status_code == 200
+    access_token: str = login_resp.json()["access_token"]
+
+    response = await async_client.post(
+        _MFA_DISABLE_URL,
+        json={"password": _STRONG_PASSWORD, "totp_code": "000000"},
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+
+    assert response.status_code == 401
+    assert "invalid" in response.json()["detail"].lower()
+
+    # mfa_enabled must remain True.
+    result = await db_session.execute(select(User).where(User.id == uuid.UUID(user_id)))
+    user: User | None = result.scalar_one_or_none()
+    assert user is not None
+    assert user.mfa_enabled is True, "mfa_enabled must remain True after invalid TOTP"
+
+    # An MFA_FAILED audit entry must have been committed before the 401 (SR-16).
+    audit_result = await db_session.execute(
+        select(AuditLog).where(
+            AuditLog.action == "MFA_FAILED",
+            AuditLog.user_id == uuid.UUID(user_id),
+        )
+    )
+    log_entry: AuditLog | None = audit_result.scalar_one_or_none()
+    assert log_entry is not None, "Expected MFA_FAILED audit log after invalid TOTP"
+    assert log_entry.details is not None
+    assert log_entry.details.get("reason") == "invalid_totp_code"
+
+
+@pytest.mark.asyncio
+async def test_mfa_disable_when_mfa_not_enabled_returns_400(
+    async_client: AsyncClient,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """POST /auth/mfa/disable on an account with mfa_enabled=False returns 400.
+
+    A fresh verified user has never enrolled in MFA.  Calling disable on such
+    an account must be rejected with HTTP 400 (SR-04).
+    """
+    email = "mfa_disable_not_enabled@example.com"
+    _user_id, access_token = await _register_verify_login(async_client, capsys, email)
+
+    response = await async_client.post(
+        _MFA_DISABLE_URL,
+        json={"password": _STRONG_PASSWORD, "totp_code": "123456"},
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+
+    assert response.status_code == 400
+    assert "not enabled" in response.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_mfa_disable_unauthenticated_returns_403(
+    async_client: AsyncClient,
+) -> None:
+    """POST /auth/mfa/disable without Authorization header returns 403.
+
+    ``HTTPBearer`` raises HTTP 403 (not 401) when the Authorization header is
+    entirely absent.  The disable endpoint must not be accessible without a
+    valid credential.
+    """
+    response = await async_client.post(
+        _MFA_DISABLE_URL,
+        json={"password": _STRONG_PASSWORD, "totp_code": "123456"},
+    )
+
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_mfa_disable_login_no_longer_requires_totp_after_disable(
+    async_client: AsyncClient,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Regression guard: after disabling MFA, login succeeds with password only.
+
+    Once MFA is disabled, the account must behave like a non-MFA account.  A
+    login with email and password but no totp_code must return a full
+    TokenResponse (HTTP 200, access_token, refresh_token) rather than the
+    MFARequiredResponse sentinel (SR-04, SR-06, SR-07).
+    """
+    email = "mfa_disable_regression@example.com"
+    user_id, secret = await _register_verify_login_and_enable_mfa(
+        async_client, capsys, email
+    )
+
+    # Re-login with TOTP to obtain a fresh token, then disable MFA.
+    valid_login_code = pyotp.TOTP(secret).now()
+    login_resp = await async_client.post(
+        _LOGIN_URL,
+        json={
+            "email": email,
+            "password": _STRONG_PASSWORD,
+            "totp_code": valid_login_code,
+        },
+    )
+    assert login_resp.status_code == 200
+    access_token: str = login_resp.json()["access_token"]
+
+    valid_disable_code = pyotp.TOTP(secret).now()
+    disable_resp = await async_client.post(
+        _MFA_DISABLE_URL,
+        json={"password": _STRONG_PASSWORD, "totp_code": valid_disable_code},
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    assert disable_resp.status_code == 200
+
+    # Login with password only — must now succeed without a TOTP code.
+    response = await async_client.post(
+        _LOGIN_URL,
+        json={"email": email, "password": _STRONG_PASSWORD},
+        # totp_code deliberately omitted
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert "access_token" in data, "access_token must be issued after MFA is disabled"
+    assert "refresh_token" in data, "refresh_token must be issued after MFA is disabled"
+    assert data.get("token_type") == "bearer"
+    assert "mfa_required" not in data, "mfa_required must not appear in TokenResponse"
