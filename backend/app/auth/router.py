@@ -185,6 +185,7 @@ async def login(
         db=db,
         redis=redis,
         settings=settings,
+        totp_code=body.totp_code,
     )
 
     if access_token is None:

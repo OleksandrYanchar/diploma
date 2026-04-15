@@ -1,5 +1,5 @@
-"""Tests for MFA endpoints: POST /auth/mfa/setup (Phase 3 Step 2) and
-POST /auth/mfa/enable (Phase 3 Step 3).
+"""Tests for MFA endpoints: POST /auth/mfa/setup (Phase 3 Step 2),
+POST /auth/mfa/enable (Phase 3 Step 3), and the MFA login gate (Phase 3 Step 4).
 
 Step 2 coverage:
 - Authenticated user calls setup → 200 with secret and QR code (SR-04, SR-16)
@@ -17,6 +17,13 @@ Step 3 coverage:
 - Enable without prior setup → 400 (SR-04)
 - Enable when already enabled → 400 (SR-04)
 - Unauthenticated call → 403 (HTTPBearer behaviour)
+
+Step 4 coverage (MFA gate at login):
+- MFA user, no totp_code → HTTP 200, mfa_required=True, no access_token (T-03)
+- MFA user, invalid totp_code → HTTP 401, MFA_FAILED audit log written (T-04)
+- MFA user, valid totp_code → HTTP 200, access_token + refresh_token issued,
+  MFA_VERIFIED audit log written (SR-04, SR-16)
+- Non-MFA user login still works (regression guard)
 
 All tests use the register → verify-email → login helper pattern to produce
 a valid access token before exercising the MFA endpoints.  Each test is
@@ -46,6 +53,12 @@ _VERIFY_URL = "/api/v1/auth/verify-email"
 _LOGIN_URL = "/api/v1/auth/login"
 _MFA_SETUP_URL = "/api/v1/auth/mfa/setup"
 _MFA_ENABLE_URL = "/api/v1/auth/mfa/enable"
+
+# ---------------------------------------------------------------------------
+# URL constants — Step 4
+# (Login URL is shared with the block above; listed here for readability.)
+# ---------------------------------------------------------------------------
+# _LOGIN_URL already defined above.
 
 _STRONG_PASSWORD = "StrongPass1!"
 
@@ -507,3 +520,221 @@ async def test_mfa_enable_unauthenticated_returns_403(
     )
 
     assert response.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 Step 4: MFA gate at POST /auth/login
+# ---------------------------------------------------------------------------
+
+
+async def _register_verify_login_and_enable_mfa(
+    async_client: AsyncClient,
+    capsys: pytest.CaptureFixture[str],
+    email: str,
+) -> tuple[str, str]:
+    """Register, verify email, log in, set up MFA, and enable it.
+
+    Performs the full enrollment flow so that the user's account has
+    ``mfa_enabled=True`` by the time this helper returns.
+
+    Args:
+        async_client: Test HTTP client fixture.
+        capsys:       pytest stdout capture fixture.
+        email:        Unique email address for this test.
+
+    Returns:
+        A 2-tuple ``(user_id, totp_secret)`` where ``user_id`` is the UUID
+        string and ``totp_secret`` is the Base32-encoded TOTP secret stored on
+        the account (needed to generate valid codes in the calling test).
+    """
+    user_id, access_token = await _register_verify_login(async_client, capsys, email)
+
+    # Initiate MFA setup — returns secret and QR code.
+    setup_resp = await async_client.post(
+        _MFA_SETUP_URL,
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    assert setup_resp.status_code == 200
+    secret: str = setup_resp.json()["secret"]
+
+    # Enable MFA by submitting a valid TOTP code.
+    valid_code = pyotp.TOTP(secret).now()
+    enable_resp = await async_client.post(
+        _MFA_ENABLE_URL,
+        json={"totp_code": valid_code},
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    assert enable_resp.status_code == 200
+
+    return user_id, secret
+
+
+@pytest.mark.asyncio
+async def test_mfa_login_no_totp_code_returns_mfa_required(
+    async_client: AsyncClient,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """T-03: Login with MFA enabled and no totp_code returns HTTP 200 + mfa_required.
+
+    After the password is verified, the service detects a missing TOTP code
+    and returns the (None, None) sentinel.  The router converts this to an
+    MFARequiredResponse (HTTP 200) without issuing any tokens (SR-04).
+
+    Asserts:
+    - HTTP 200
+    - Response body has mfa_required=True
+    - Response body does NOT contain access_token or refresh_token
+    """
+    email = "mfa_login_no_code@example.com"
+    _user_id, _secret = await _register_verify_login_and_enable_mfa(
+        async_client, capsys, email
+    )
+
+    response = await async_client.post(
+        _LOGIN_URL,
+        json={"email": email, "password": _STRONG_PASSWORD},
+        # totp_code deliberately omitted
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+    assert data.get("mfa_required") is True, "Expected mfa_required=True"
+    assert "access_token" not in data, "access_token must not be issued without TOTP"
+    assert "refresh_token" not in data, "refresh_token must not be issued without TOTP"
+
+
+@pytest.mark.asyncio
+async def test_mfa_login_invalid_totp_code_returns_401_and_writes_mfa_failed_audit(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """T-04: Login with MFA enabled and an invalid TOTP code returns HTTP 401.
+
+    The service must reject the wrong code, commit a MFA_FAILED audit log
+    entry BEFORE raising, and return 401 with an appropriate detail message
+    (SR-04, SR-16).
+
+    Asserts:
+    - HTTP 401
+    - Response detail contains "invalid"
+    - MFA_FAILED AuditLog row exists for the user in the database
+    """
+    email = "mfa_login_bad_code@example.com"
+    user_id, _secret = await _register_verify_login_and_enable_mfa(
+        async_client, capsys, email
+    )
+
+    response = await async_client.post(
+        _LOGIN_URL,
+        json={"email": email, "password": _STRONG_PASSWORD, "totp_code": "000000"},
+    )
+
+    assert response.status_code == 401
+    assert "invalid" in response.json()["detail"].lower()
+
+    # An MFA_FAILED audit entry must have been committed before the 401 (SR-16).
+    result = await db_session.execute(
+        select(AuditLog).where(
+            AuditLog.action == "MFA_FAILED",
+            AuditLog.user_id == uuid.UUID(user_id),
+        )
+    )
+    log_entry: AuditLog | None = result.scalar_one_or_none()
+    assert (
+        log_entry is not None
+    ), "Expected an MFA_FAILED audit log entry after bad TOTP"
+    assert log_entry.details is not None
+    assert log_entry.details.get("reason") == "invalid_totp_code"
+
+
+@pytest.mark.asyncio
+async def test_mfa_login_valid_totp_code_returns_tokens_and_writes_mfa_verified_audit(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Login with MFA enabled and a valid TOTP code issues tokens + MFA_VERIFIED audit.
+
+    A correct TOTP code must complete authentication, producing a full
+    TokenResponse (access_token, refresh_token, token_type, expires_in) and
+    an MFA_VERIFIED audit log entry committed atomically with the session
+    creation (SR-04, SR-06, SR-07, SR-10, SR-16).
+
+    Asserts:
+    - HTTP 200
+    - Response contains access_token, refresh_token, token_type, expires_in
+    - MFA_VERIFIED AuditLog row exists for the user in the database
+    """
+    email = "mfa_login_good_code@example.com"
+    user_id, secret = await _register_verify_login_and_enable_mfa(
+        async_client, capsys, email
+    )
+
+    valid_code = pyotp.TOTP(secret).now()
+    response = await async_client.post(
+        _LOGIN_URL,
+        json={"email": email, "password": _STRONG_PASSWORD, "totp_code": valid_code},
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+    assert (
+        "access_token" in data
+    ), "access_token must be present on successful MFA login"
+    assert (
+        "refresh_token" in data
+    ), "refresh_token must be present on successful MFA login"
+    assert data.get("token_type") == "bearer"
+    assert isinstance(data.get("expires_in"), int) and data["expires_in"] > 0
+
+    # An MFA_VERIFIED audit entry must exist for this user (SR-16).
+    result = await db_session.execute(
+        select(AuditLog).where(
+            AuditLog.action == "MFA_VERIFIED",
+            AuditLog.user_id == uuid.UUID(user_id),
+        )
+    )
+    log_entry: AuditLog | None = result.scalar_one_or_none()
+    assert log_entry is not None, "Expected an MFA_VERIFIED audit log entry"
+
+
+@pytest.mark.asyncio
+async def test_login_without_mfa_still_works_after_step4(
+    async_client: AsyncClient,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Regression guard: non-MFA login continues to work after Step 4 changes.
+
+    A verified user with mfa_enabled=False must receive a full TokenResponse
+    (HTTP 200, access_token, refresh_token) when no totp_code is supplied.
+    This ensures the Step 4 MFA gate did not break the existing code path
+    for users who have not enrolled in MFA (SR-06, SR-07).
+
+    Asserts:
+    - HTTP 200
+    - Response contains access_token and refresh_token
+    - token_type is "bearer"
+    """
+    email = "no_mfa_regression@example.com"
+    _user_id, access_token = await _register_verify_login(async_client, capsys, email)
+
+    # _register_verify_login already performs a successful login and returns the
+    # access_token.  We assert here that the login step inside that helper did
+    # in fact succeed with full tokens (not an mfa_required sentinel).
+    assert isinstance(access_token, str) and len(access_token) > 0
+
+    # Perform a second explicit login to confirm the endpoint is still correct.
+    response = await async_client.post(
+        _LOGIN_URL,
+        json={"email": email, "password": _STRONG_PASSWORD},
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+    assert "access_token" in data, "Non-MFA login must return access_token"
+    assert "refresh_token" in data, "Non-MFA login must return refresh_token"
+    assert data.get("token_type") == "bearer"

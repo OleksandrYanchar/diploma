@@ -24,8 +24,8 @@ Security properties enforced:
 - SR-10: Redis session created on login keyed by session_id; deleted on logout or
   on reuse detection.
 - SR-16: Audit log entries created for REGISTER, EMAIL_VERIFIED, LOGIN_SUCCESS,
-  LOGIN_FAILED, LOGOUT, TOKEN_REFRESHED, MFA_SETUP_INITIATED, MFA_ENABLED, and
-  MFA_FAILED events.
+  LOGIN_FAILED, LOGOUT, TOKEN_REFRESHED, MFA_SETUP_INITIATED, MFA_ENABLED,
+  MFA_FAILED, LOGIN_MFA_REQUIRED, and MFA_VERIFIED events.
 """
 
 from __future__ import annotations
@@ -213,6 +213,7 @@ async def login(
     db: AsyncSession,
     redis: Redis,  # type: ignore[type-arg]
     settings: Settings,
+    totp_code: str | None = None,
 ) -> tuple[str, str] | tuple[None, None]:
     """Authenticate a user and create a new session, issuing JWT + refresh token.
 
@@ -226,11 +227,13 @@ async def login(
     runs, making the response time independent of whether the email exists.
 
     Args:
-        email:    The email address supplied by the authenticating user.
-        password: The plaintext password supplied by the authenticating user.
-        db:       An async SQLAlchemy session for the current request.
-        redis:    The shared async Redis client for session storage (SR-10).
-        settings: Application settings supplying token lifetimes and lockout policy.
+        email:     The email address supplied by the authenticating user.
+        password:  The plaintext password supplied by the authenticating user.
+        db:        An async SQLAlchemy session for the current request.
+        redis:     The shared async Redis client for session storage (SR-10).
+        settings:  Application settings supplying token lifetimes and lockout policy.
+        totp_code: Optional six-to-eight-digit TOTP code.  Must be supplied when
+                   the account has MFA enabled; ignored otherwise (SR-04).
 
     Returns:
         A 2-tuple ``(access_token, raw_refresh_token)`` on successful
@@ -239,13 +242,15 @@ async def login(
         client and never stored plaintext server-side.
 
         Returns ``(None, None)`` when the password is correct but MFA is enabled
-        on the account.  The router must detect this sentinel and return an
-        ``MFARequiredResponse`` (HTTP 200) instead of a ``TokenResponse``.  No
-        session is created and no tokens are issued on this path.
+        and ``totp_code`` was not supplied.  The router must detect this sentinel
+        and return an ``MFARequiredResponse`` (HTTP 200) so that the client can
+        prompt the user for their TOTP code and re-submit.  No session is created
+        and no tokens are issued on this path.
 
     Raises:
-        HTTPException 401: If credentials are invalid (wrong email or password).
-            The same message is returned in both cases to prevent enumeration.
+        HTTPException 401: If credentials are invalid (wrong email or password),
+            or if the supplied TOTP code is invalid.  The same message is returned
+            for email/password failures to prevent enumeration (SR-04, SR-05).
         HTTPException 403: If the account is deactivated or temporarily locked.
     """
 
@@ -325,27 +330,65 @@ async def login(
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     # ------------------------------------------------------------------
-    # Step 6: MFA gate — if the account has MFA enabled, signal the client
-    # to supply a TOTP code.  The TOTP verification path is Phase 3.
+    # Step 6: MFA gate — if the account has MFA enabled, either verify the
+    # supplied TOTP code or signal the client to supply one.
     #
-    # Returning (None, None) rather than raising an HTTPException avoids the
-    # incorrect pattern of using HTTP 200 as an exception status code, which
-    # bypasses FastAPI's response_model serialization.  The router detects the
-    # sentinel and returns an MFARequiredResponse with HTTP 200.  No session is
-    # created and no tokens are issued on this path.
+    # Sub-case A (no totp_code supplied):
+    #   Return the sentinel (None, None) so the router can issue HTTP 200
+    #   with MFARequiredResponse.  A LOGIN_MFA_REQUIRED audit log is written
+    #   to record the password-verified, TOTP-pending state (SR-16).
+    #
+    # Sub-case B (totp_code supplied but invalid):
+    #   Write a MFA_FAILED audit log, commit it BEFORE raising so the failure
+    #   is always persisted regardless of exception handling above this call
+    #   site, then raise HTTPException 401 (SR-04, SR-16).
+    #
+    # Sub-case C (totp_code supplied and valid):
+    #   Write a MFA_VERIFIED audit log and fall through to token issuance.
+    #   The audit entry is committed with the session/token writes below so
+    #   that the success record and the session are always atomic (SR-16).
     # ------------------------------------------------------------------
     if user.mfa_enabled:
-        # SR-16: Audit log for the MFA gate event (password verified, TOTP pending).
+        if not totp_code:
+            # Sub-case A: password was valid but no TOTP code was provided.
+            # SR-16: Audit log for the MFA gate event.
+            db.add(
+                AuditLog(
+                    user_id=user.id,
+                    action="LOGIN_MFA_REQUIRED",
+                    ip_address=None,
+                    details={"session_id": None},
+                )
+            )
+            await db.commit()
+            return None, None
+
+        # Sub-case B/C: a TOTP code was supplied — verify it (SR-04).
+        if not verify_totp_code(user.mfa_secret, totp_code):
+            # Sub-case B: invalid TOTP code.
+            # Commit the audit entry BEFORE raising so the failure event is
+            # always persisted (SR-16), matching the LOGIN_FAILED pattern.
+            db.add(
+                AuditLog(
+                    user_id=user.id,
+                    action="MFA_FAILED",
+                    ip_address=None,
+                    details={"reason": "invalid_totp_code"},
+                )
+            )
+            await db.commit()
+            raise HTTPException(status_code=401, detail="Invalid TOTP code")
+
+        # Sub-case C: TOTP code is valid.  Stage the success audit log — it
+        # will be committed atomically with the session/token writes below.
         db.add(
             AuditLog(
                 user_id=user.id,
-                action="LOGIN_MFA_REQUIRED",
+                action="MFA_VERIFIED",
                 ip_address=None,
-                details={"session_id": None},
+                details={"email": user.email},
             )
         )
-        await db.commit()
-        return None, None
 
     # ------------------------------------------------------------------
     # Steps 7–16: Successful authentication path.
