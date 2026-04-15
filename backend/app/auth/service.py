@@ -13,7 +13,8 @@ Security properties enforced:
 - SR-03: Email verification token stored as SHA-256 hash; raw token delivered
   out-of-band (console in demo mode).
 - SR-04: TOTP secret stored on first setup only; never returned again after
-  the initial ``setup_mfa`` response.
+  the initial ``setup_mfa`` response.  ``enable_mfa`` activates the gate
+  after the first successful TOTP code is verified.
 - SR-05: Account lockout after N consecutive failed login attempts.
 - SR-06: Access tokens are short-lived JWTs issued on successful login.
 - SR-07: Refresh tokens stored as SHA-256 hash; raw token returned to client once.
@@ -23,7 +24,8 @@ Security properties enforced:
 - SR-10: Redis session created on login keyed by session_id; deleted on logout or
   on reuse detection.
 - SR-16: Audit log entries created for REGISTER, EMAIL_VERIFIED, LOGIN_SUCCESS,
-  LOGIN_FAILED, LOGOUT, TOKEN_REFRESHED, and MFA_SETUP_INITIATED events.
+  LOGIN_FAILED, LOGOUT, TOKEN_REFRESHED, MFA_SETUP_INITIATED, MFA_ENABLED, and
+  MFA_FAILED events.
 """
 
 from __future__ import annotations
@@ -45,7 +47,11 @@ from app.core.security import (
     is_password_strong,
     verify_password,
 )
-from app.core.totp import generate_qr_code_base64, generate_totp_secret
+from app.core.totp import (
+    generate_qr_code_base64,
+    generate_totp_secret,
+    verify_totp_code,
+)
 from app.models.audit_log import AuditLog
 from app.models.refresh_token import RefreshToken
 from app.models.user import User, UserRole
@@ -777,3 +783,94 @@ async def setup_mfa(
     )
 
     return secret, qr_code_base64
+
+
+async def enable_mfa(
+    user: User,
+    totp_code: str,
+    db: AsyncSession,
+) -> None:
+    """Verify the first TOTP code and activate MFA for the user.
+
+    Enforces SR-04 (TOTP gate activation after confirmed enrollment) and
+    SR-16 (audit log on both MFA_ENABLED success and MFA_FAILED failure).
+
+    The caller must be an authenticated user who has already completed the
+    ``setup_mfa`` step (i.e., ``user.mfa_secret`` is set).  The first
+    successful TOTP code submission proves that the user has the correct
+    secret in their authenticator app, at which point the MFA gate is
+    activated by setting ``mfa_enabled = True``.
+
+    The MFA_FAILED audit log entry is committed BEFORE raising the
+    HTTPException so that the failure event is always persisted regardless
+    of any exception handling above this call site.  This matches the
+    pattern used by the login failure path (SR-16).
+
+    Args:
+        user:      The authenticated User requesting MFA activation.
+        totp_code: The six-to-eight-digit TOTP code submitted by the user.
+        db:        An async SQLAlchemy session for the current request.
+
+    Raises:
+        HTTPException 400: If ``user.mfa_secret`` is None (setup was never
+            initiated) or if MFA is already enabled on the account.
+        HTTPException 401: If the supplied TOTP code is invalid, with a
+            MFA_FAILED audit log entry committed before raising.
+    """
+    # ------------------------------------------------------------------
+    # Step 1: Reject if no setup was ever initiated.
+    # mfa_secret is None until setup_mfa is called.  An enable attempt
+    # before setup has no secret to verify against — reject immediately.
+    # ------------------------------------------------------------------
+    if user.mfa_secret is None:
+        raise HTTPException(
+            status_code=400,
+            detail="MFA setup not initiated",
+        )
+
+    # ------------------------------------------------------------------
+    # Step 2: Reject if MFA is already active.
+    # Re-enabling an already-enabled account is a no-op at best and a
+    # mistake at worst.  The user must disable first (Phase 4).
+    # ------------------------------------------------------------------
+    if user.mfa_enabled:
+        raise HTTPException(
+            status_code=400,
+            detail="MFA is already enabled",
+        )
+
+    # ------------------------------------------------------------------
+    # Step 3 & 4: Verify the TOTP code.
+    # verify_totp_code uses pyotp's constant-time HMAC comparison (SR-04).
+    # On failure: commit the audit log entry BEFORE raising so the event
+    # is always persisted (SR-16).
+    # ------------------------------------------------------------------
+    if not verify_totp_code(user.mfa_secret, totp_code):
+        db.add(
+            AuditLog(
+                user_id=user.id,
+                action="MFA_FAILED",
+                ip_address=None,
+                details={"reason": "invalid_totp_code"},
+            )
+        )
+        await db.commit()
+        raise HTTPException(status_code=401, detail="Invalid TOTP code")
+
+    # ------------------------------------------------------------------
+    # Step 5: Activate the MFA gate and write the success audit log.
+    # Both mutations are committed in a single atomic transaction so the
+    # user state and the audit record are always consistent (SR-16).
+    # ------------------------------------------------------------------
+    user.mfa_enabled = True
+
+    db.add(
+        AuditLog(
+            user_id=user.id,
+            action="MFA_ENABLED",
+            ip_address=None,
+            details={"email": user.email},
+        )
+    )
+
+    await db.commit()

@@ -1,6 +1,7 @@
-"""Tests for the POST /auth/mfa/setup endpoint (Phase 3 Step 2).
+"""Tests for MFA endpoints: POST /auth/mfa/setup (Phase 3 Step 2) and
+POST /auth/mfa/enable (Phase 3 Step 3).
 
-Covers:
+Step 2 coverage:
 - Authenticated user calls setup → 200 with secret and QR code (SR-04, SR-16)
 - Secret is non-empty, QR code is valid base64 (SR-04)
 - mfa_secret is persisted to DB; mfa_enabled remains False (SR-04)
@@ -9,8 +10,16 @@ Covers:
 - Setup when MFA already enabled → 400 (SR-04)
 - Re-setup overwrites old secret and updates mfa_secret in DB
 
+Step 3 coverage:
+- Valid TOTP code enables MFA → 200; mfa_enabled True in DB; MFA_ENABLED audit log
+  (SR-04, SR-16)
+- Invalid TOTP code → 401; mfa_enabled remains False; MFA_FAILED audit log (SR-16)
+- Enable without prior setup → 400 (SR-04)
+- Enable when already enabled → 400 (SR-04)
+- Unauthenticated call → 403 (HTTPBearer behaviour)
+
 All tests use the register → verify-email → login helper pattern to produce
-a valid access token before exercising the MFA setup endpoint.  Each test is
+a valid access token before exercising the MFA endpoints.  Each test is
 fully isolated via the ``async_client`` fixture (fresh SQLite + FakeRedis per
 test).
 """
@@ -20,6 +29,7 @@ from __future__ import annotations
 import base64
 import uuid
 
+import pyotp
 import pytest
 from httpx import AsyncClient
 from sqlalchemy import select
@@ -35,6 +45,7 @@ _REGISTER_URL = "/api/v1/auth/register"
 _VERIFY_URL = "/api/v1/auth/verify-email"
 _LOGIN_URL = "/api/v1/auth/login"
 _MFA_SETUP_URL = "/api/v1/auth/mfa/setup"
+_MFA_ENABLE_URL = "/api/v1/auth/mfa/enable"
 
 _STRONG_PASSWORD = "StrongPass1!"
 
@@ -292,3 +303,207 @@ async def test_mfa_setup_overwrites_abandoned_secret(
         user.mfa_secret == second_secret
     ), "The stored secret must match the most recent setup response"
     assert user.mfa_enabled is False
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 Step 3: POST /auth/mfa/enable tests
+# ---------------------------------------------------------------------------
+
+
+async def _setup_mfa_and_get_secret(
+    async_client: AsyncClient,
+    access_token: str,
+) -> str:
+    """Call POST /auth/mfa/setup and return the TOTP secret.
+
+    Args:
+        async_client: Test HTTP client fixture.
+        access_token: Valid Bearer token for the authenticated user.
+
+    Returns:
+        The Base32-encoded TOTP secret string from the setup response.
+    """
+    setup_resp = await async_client.post(
+        _MFA_SETUP_URL,
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    assert setup_resp.status_code == 200
+    return setup_resp.json()["secret"]
+
+
+@pytest.mark.asyncio
+async def test_mfa_enable_valid_code_returns_200_and_activates_mfa(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """POST /auth/mfa/enable with valid TOTP → 200; mfa_enabled True; MFA_ENABLED audit.
+
+    Confirms the full happy path for SR-04 enrollment (SR-04, SR-16):
+    1. Setup is called to obtain the secret.
+    2. A valid TOTP code is generated from that secret using pyotp.
+    3. POST /auth/mfa/enable accepts the code and activates the MFA gate.
+    4. The DB row reflects mfa_enabled = True.
+    5. An MFA_ENABLED audit log entry is recorded (SR-16).
+    """
+    email = "mfa_enable_valid@example.com"
+    user_id, access_token = await _register_verify_login(async_client, capsys, email)
+
+    secret = await _setup_mfa_and_get_secret(async_client, access_token)
+
+    # Generate a valid TOTP code from the secret returned by setup.
+    valid_code = pyotp.TOTP(secret).now()
+
+    response = await async_client.post(
+        _MFA_ENABLE_URL,
+        json={"totp_code": valid_code},
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+
+    assert response.status_code == 200
+    assert response.json().get("detail") == "MFA enabled successfully"
+
+    # The DB row must reflect the activated gate.
+    result = await db_session.execute(select(User).where(User.id == uuid.UUID(user_id)))
+    user: User | None = result.scalar_one_or_none()
+    assert user is not None
+    assert user.mfa_enabled is True, "mfa_enabled must be True after successful enable"
+
+    # An MFA_ENABLED audit log entry must exist for this user.
+    audit_result = await db_session.execute(
+        select(AuditLog).where(
+            AuditLog.action == "MFA_ENABLED",
+            AuditLog.user_id == uuid.UUID(user_id),
+        )
+    )
+    log_entry: AuditLog | None = audit_result.scalar_one_or_none()
+    assert log_entry is not None, "Expected an MFA_ENABLED audit log entry"
+
+
+@pytest.mark.asyncio
+async def test_mfa_enable_invalid_code_returns_401_and_writes_mfa_failed_audit(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Invalid TOTP code → 401; mfa_enabled stays False; MFA_FAILED audit written.
+
+    Verifies that a wrong code is rejected securely (SR-04) and that the
+    failure is recorded before the exception is raised (SR-16).
+    """
+    email = "mfa_enable_invalid@example.com"
+    user_id, access_token = await _register_verify_login(async_client, capsys, email)
+
+    await _setup_mfa_and_get_secret(async_client, access_token)
+
+    # Submit a code that is guaranteed to be wrong.
+    response = await async_client.post(
+        _MFA_ENABLE_URL,
+        json={"totp_code": "000000"},
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+
+    assert response.status_code == 401
+    assert "invalid" in response.json()["detail"].lower()
+
+    # mfa_enabled must remain False — the gate must not activate on failure.
+    result = await db_session.execute(select(User).where(User.id == uuid.UUID(user_id)))
+    user: User | None = result.scalar_one_or_none()
+    assert user is not None
+    assert user.mfa_enabled is False, "mfa_enabled must remain False after invalid code"
+
+    # An MFA_FAILED audit log entry must have been committed before the 401.
+    audit_result = await db_session.execute(
+        select(AuditLog).where(
+            AuditLog.action == "MFA_FAILED",
+            AuditLog.user_id == uuid.UUID(user_id),
+        )
+    )
+    log_entry: AuditLog | None = audit_result.scalar_one_or_none()
+    assert log_entry is not None, "Expected an MFA_FAILED audit log entry"
+
+
+@pytest.mark.asyncio
+async def test_mfa_enable_without_prior_setup_returns_400(
+    async_client: AsyncClient,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """POST /auth/mfa/enable without calling setup first returns 400.
+
+    A fresh user has mfa_secret = None.  Enabling before setup has no secret
+    to verify against and must be rejected (SR-04).
+    """
+    email = "mfa_enable_no_setup@example.com"
+    _user_id, access_token = await _register_verify_login(async_client, capsys, email)
+
+    # Attempt enable without calling setup first.
+    response = await async_client.post(
+        _MFA_ENABLE_URL,
+        json={"totp_code": "123456"},
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+
+    assert response.status_code == 400
+    assert "not initiated" in response.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_mfa_enable_when_already_enabled_returns_400(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """POST /auth/mfa/enable after MFA is already active returns 400.
+
+    After a successful enable, calling enable again (even with a valid code)
+    must be rejected — the gate is already active and re-activation is not
+    permitted without a disable step (SR-04).
+    """
+    email = "mfa_enable_already_on@example.com"
+    user_id, access_token = await _register_verify_login(async_client, capsys, email)
+
+    secret = await _setup_mfa_and_get_secret(async_client, access_token)
+
+    # First enable — must succeed.
+    first_code = pyotp.TOTP(secret).now()
+    first_resp = await async_client.post(
+        _MFA_ENABLE_URL,
+        json={"totp_code": first_code},
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    assert first_resp.status_code == 200
+
+    # Confirm mfa_enabled is True in DB before the second attempt.
+    result = await db_session.execute(select(User).where(User.id == uuid.UUID(user_id)))
+    user: User | None = result.scalar_one_or_none()
+    assert user is not None
+    assert user.mfa_enabled is True
+
+    # Second enable — must be rejected because MFA is already active.
+    second_code = pyotp.TOTP(secret).now()
+    second_resp = await async_client.post(
+        _MFA_ENABLE_URL,
+        json={"totp_code": second_code},
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+
+    assert second_resp.status_code == 400
+    assert "already enabled" in second_resp.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_mfa_enable_unauthenticated_returns_403(
+    async_client: AsyncClient,
+) -> None:
+    """POST /auth/mfa/enable without Authorization header returns 403.
+
+    ``HTTPBearer`` raises HTTP 403 (not 401) when the Authorization header is
+    entirely absent.  The enable endpoint must not be accessible without a
+    valid credential.
+    """
+    response = await async_client.post(
+        _MFA_ENABLE_URL,
+        json={"totp_code": "123456"},
+    )
+
+    assert response.status_code == 403
