@@ -1,17 +1,19 @@
-"""Authentication service — registration, verification, login, refresh, and logout.
+"""Authentication service — registration, verification, login, refresh, logout, and MFA.
 
 This module implements the core business logic for user registration, email
 address verification, login with session creation, logout with session
-teardown, and refresh token rotation with reuse detection.  It has no HTTP
-concerns: no Request or Response objects, no dependency injection containers.
-All inputs are plain Python values; the caller (router) is responsible for
-extracting them from the HTTP layer.
+teardown, refresh token rotation with reuse detection, and TOTP MFA
+enrollment.  It has no HTTP concerns: no Request or Response objects, no
+dependency injection containers.  All inputs are plain Python values; the
+caller (router) is responsible for extracting them from the HTTP layer.
 
 Security properties enforced:
 - SR-01: Password strength validated via ``is_password_strong`` before hashing.
 - SR-02: Passwords stored as Argon2id hash only — plaintext is never persisted.
 - SR-03: Email verification token stored as SHA-256 hash; raw token delivered
   out-of-band (console in demo mode).
+- SR-04: TOTP secret stored on first setup only; never returned again after
+  the initial ``setup_mfa`` response.
 - SR-05: Account lockout after N consecutive failed login attempts.
 - SR-06: Access tokens are short-lived JWTs issued on successful login.
 - SR-07: Refresh tokens stored as SHA-256 hash; raw token returned to client once.
@@ -21,7 +23,7 @@ Security properties enforced:
 - SR-10: Redis session created on login keyed by session_id; deleted on logout or
   on reuse detection.
 - SR-16: Audit log entries created for REGISTER, EMAIL_VERIFIED, LOGIN_SUCCESS,
-  LOGIN_FAILED, LOGOUT, and TOKEN_REFRESHED events.
+  LOGIN_FAILED, LOGOUT, TOKEN_REFRESHED, and MFA_SETUP_INITIATED events.
 """
 
 from __future__ import annotations
@@ -43,6 +45,7 @@ from app.core.security import (
     is_password_strong,
     verify_password,
 )
+from app.core.totp import generate_qr_code_base64, generate_totp_secret
 from app.models.audit_log import AuditLog
 from app.models.refresh_token import RefreshToken
 from app.models.user import User, UserRole
@@ -686,3 +689,91 @@ async def logout(
     # Step 5: Commit all database mutations atomically.
     # ------------------------------------------------------------------
     await db.commit()
+
+
+async def setup_mfa(
+    user: User,
+    db: AsyncSession,
+    settings: Settings,
+) -> tuple[str, str]:
+    """Generate and store a TOTP secret for the user, returning the secret and QR code.
+
+    Enforces SR-04 (TOTP secret stored once during enrollment; never returned
+    again after this call) and SR-16 (audit log on MFA_SETUP_INITIATED event).
+
+    If ``user.mfa_enabled`` is True the call is rejected immediately — MFA
+    cannot be re-initialised without first disabling it (Phase 4).
+
+    If ``user.mfa_secret`` is already set but ``mfa_enabled`` is still False,
+    a prior setup was abandoned before verification.  The old secret is
+    overwritten silently: the abandoned secret was never confirmed by a
+    successful TOTP code submission, so it has no security value.
+
+    The QR code embeds the raw secret and is therefore as sensitive as the
+    secret itself.  Both must be transmitted over TLS and must not be cached
+    or logged.  The secret is returned to the caller exactly once; all
+    subsequent API calls must never reveal it.
+
+    Args:
+        user:     The authenticated User requesting MFA enrollment.
+        db:       An async SQLAlchemy session for the current request.
+        settings: Application settings supplying ``app_name`` as the TOTP
+                  issuer name shown inside the authenticator app.
+
+    Returns:
+        A 2-tuple ``(secret, qr_code_base64)`` where ``secret`` is the
+        Base32-encoded TOTP secret and ``qr_code_base64`` is a UTF-8
+        base64-encoded PNG image of the provisioning QR code.
+
+    Raises:
+        HTTPException 400: If MFA is already fully enabled on the account.
+    """
+    # ------------------------------------------------------------------
+    # Step 1: Reject if MFA is already active (SR-04).
+    # An already-enabled account must go through disable first (Phase 4).
+    # ------------------------------------------------------------------
+    if user.mfa_enabled:
+        raise HTTPException(
+            status_code=400,
+            detail="MFA is already enabled",
+        )
+
+    # ------------------------------------------------------------------
+    # Step 2: Generate a fresh TOTP secret (SR-04).
+    # Any previously abandoned secret (mfa_secret set, mfa_enabled False)
+    # is overwritten.  The old secret was never confirmed by a valid TOTP
+    # code, so discarding it is the correct behaviour.
+    # ------------------------------------------------------------------
+    secret = generate_totp_secret()
+    user.mfa_secret = secret
+
+    # Flush so the mfa_secret write is part of the same DB transaction
+    # before the audit log is appended.
+    await db.flush()
+
+    # ------------------------------------------------------------------
+    # Step 3: Write the audit log entry BEFORE committing (SR-16).
+    # Committing once with both the secret update and the audit row
+    # ensures the two are always consistent — either both land or neither.
+    # ------------------------------------------------------------------
+    audit = AuditLog(
+        user_id=user.id,
+        action="MFA_SETUP_INITIATED",
+        ip_address=None,
+        details={"email": user.email},
+    )
+    db.add(audit)
+    await db.commit()
+
+    # ------------------------------------------------------------------
+    # Step 4: Generate the QR code after committing.
+    # The provisioning URI is built from the confirmed-saved secret.
+    # The issuer name comes from settings.app_name (SR-04).
+    # ------------------------------------------------------------------
+    qr_code_base64 = generate_qr_code_base64(
+        secret=secret,
+        email=user.email,
+        issuer=settings.app_name,
+    )
+
+    return secret, qr_code_base64
