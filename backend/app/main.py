@@ -19,6 +19,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.admin.router import router as admin_router
 from app.auth.router import router as auth_router
 from app.core.config import Settings, get_settings
 from app.core.database import close_db, init_db
@@ -95,10 +96,11 @@ def create_application() -> FastAPI:
     # --- Routers ---
     # Phase 1: health only.
     # Phase 2: auth (registration, email verification; login/refresh added later).
-    # Phase 4: users (GET /users/me).
+    # Phase 4: users (GET /users/me), admin (GET /admin/ping — RBAC anchor).
     application.include_router(health_router, prefix="/api/v1")
     application.include_router(auth_router, prefix="/api/v1")
     application.include_router(users_router, prefix="/api/v1")
+    application.include_router(admin_router, prefix="/api/v1")
 
     return application
 
