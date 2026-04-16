@@ -1,17 +1,20 @@
-"""Authentication service — registration, verification, login, refresh, and logout.
+"""Authentication service — registration, verification, login, refresh, logout, and MFA.
 
 This module implements the core business logic for user registration, email
 address verification, login with session creation, logout with session
-teardown, and refresh token rotation with reuse detection.  It has no HTTP
-concerns: no Request or Response objects, no dependency injection containers.
-All inputs are plain Python values; the caller (router) is responsible for
-extracting them from the HTTP layer.
+teardown, refresh token rotation with reuse detection, and TOTP MFA
+enrollment.  It has no HTTP concerns: no Request or Response objects, no
+dependency injection containers.  All inputs are plain Python values; the
+caller (router) is responsible for extracting them from the HTTP layer.
 
 Security properties enforced:
 - SR-01: Password strength validated via ``is_password_strong`` before hashing.
 - SR-02: Passwords stored as Argon2id hash only — plaintext is never persisted.
 - SR-03: Email verification token stored as SHA-256 hash; raw token delivered
   out-of-band (console in demo mode).
+- SR-04: TOTP secret stored on first setup only; never returned again after
+  the initial ``setup_mfa`` response.  ``enable_mfa`` activates the gate
+  after the first successful TOTP code is verified.
 - SR-05: Account lockout after N consecutive failed login attempts.
 - SR-06: Access tokens are short-lived JWTs issued on successful login.
 - SR-07: Refresh tokens stored as SHA-256 hash; raw token returned to client once.
@@ -21,7 +24,8 @@ Security properties enforced:
 - SR-10: Redis session created on login keyed by session_id; deleted on logout or
   on reuse detection.
 - SR-16: Audit log entries created for REGISTER, EMAIL_VERIFIED, LOGIN_SUCCESS,
-  LOGIN_FAILED, LOGOUT, and TOKEN_REFRESHED events.
+  LOGIN_FAILED, LOGOUT, TOKEN_REFRESHED, MFA_SETUP_INITIATED, MFA_ENABLED,
+  MFA_FAILED, LOGIN_MFA_REQUIRED, and MFA_VERIFIED events.
 """
 
 from __future__ import annotations
@@ -42,6 +46,11 @@ from app.core.security import (
     hash_token,
     is_password_strong,
     verify_password,
+)
+from app.core.totp import (
+    generate_qr_code_base64,
+    generate_totp_secret,
+    verify_totp_code,
 )
 from app.models.audit_log import AuditLog
 from app.models.refresh_token import RefreshToken
@@ -204,6 +213,7 @@ async def login(
     db: AsyncSession,
     redis: Redis,  # type: ignore[type-arg]
     settings: Settings,
+    totp_code: str | None = None,
 ) -> tuple[str, str] | tuple[None, None]:
     """Authenticate a user and create a new session, issuing JWT + refresh token.
 
@@ -217,11 +227,13 @@ async def login(
     runs, making the response time independent of whether the email exists.
 
     Args:
-        email:    The email address supplied by the authenticating user.
-        password: The plaintext password supplied by the authenticating user.
-        db:       An async SQLAlchemy session for the current request.
-        redis:    The shared async Redis client for session storage (SR-10).
-        settings: Application settings supplying token lifetimes and lockout policy.
+        email:     The email address supplied by the authenticating user.
+        password:  The plaintext password supplied by the authenticating user.
+        db:        An async SQLAlchemy session for the current request.
+        redis:     The shared async Redis client for session storage (SR-10).
+        settings:  Application settings supplying token lifetimes and lockout policy.
+        totp_code: Optional six-to-eight-digit TOTP code.  Must be supplied when
+                   the account has MFA enabled; ignored otherwise (SR-04).
 
     Returns:
         A 2-tuple ``(access_token, raw_refresh_token)`` on successful
@@ -230,13 +242,15 @@ async def login(
         client and never stored plaintext server-side.
 
         Returns ``(None, None)`` when the password is correct but MFA is enabled
-        on the account.  The router must detect this sentinel and return an
-        ``MFARequiredResponse`` (HTTP 200) instead of a ``TokenResponse``.  No
-        session is created and no tokens are issued on this path.
+        and ``totp_code`` was not supplied.  The router must detect this sentinel
+        and return an ``MFARequiredResponse`` (HTTP 200) so that the client can
+        prompt the user for their TOTP code and re-submit.  No session is created
+        and no tokens are issued on this path.
 
     Raises:
-        HTTPException 401: If credentials are invalid (wrong email or password).
-            The same message is returned in both cases to prevent enumeration.
+        HTTPException 401: If credentials are invalid (wrong email or password),
+            or if the supplied TOTP code is invalid.  The same message is returned
+            for email/password failures to prevent enumeration (SR-04, SR-05).
         HTTPException 403: If the account is deactivated or temporarily locked.
     """
 
@@ -316,27 +330,65 @@ async def login(
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     # ------------------------------------------------------------------
-    # Step 6: MFA gate — if the account has MFA enabled, signal the client
-    # to supply a TOTP code.  The TOTP verification path is Phase 3.
+    # Step 6: MFA gate — if the account has MFA enabled, either verify the
+    # supplied TOTP code or signal the client to supply one.
     #
-    # Returning (None, None) rather than raising an HTTPException avoids the
-    # incorrect pattern of using HTTP 200 as an exception status code, which
-    # bypasses FastAPI's response_model serialization.  The router detects the
-    # sentinel and returns an MFARequiredResponse with HTTP 200.  No session is
-    # created and no tokens are issued on this path.
+    # Sub-case A (no totp_code supplied):
+    #   Return the sentinel (None, None) so the router can issue HTTP 200
+    #   with MFARequiredResponse.  A LOGIN_MFA_REQUIRED audit log is written
+    #   to record the password-verified, TOTP-pending state (SR-16).
+    #
+    # Sub-case B (totp_code supplied but invalid):
+    #   Write a MFA_FAILED audit log, commit it BEFORE raising so the failure
+    #   is always persisted regardless of exception handling above this call
+    #   site, then raise HTTPException 401 (SR-04, SR-16).
+    #
+    # Sub-case C (totp_code supplied and valid):
+    #   Write a MFA_VERIFIED audit log and fall through to token issuance.
+    #   The audit entry is committed with the session/token writes below so
+    #   that the success record and the session are always atomic (SR-16).
     # ------------------------------------------------------------------
     if user.mfa_enabled:
-        # SR-16: Audit log for the MFA gate event (password verified, TOTP pending).
+        if not totp_code:
+            # Sub-case A: password was valid but no TOTP code was provided.
+            # SR-16: Audit log for the MFA gate event.
+            db.add(
+                AuditLog(
+                    user_id=user.id,
+                    action="LOGIN_MFA_REQUIRED",
+                    ip_address=None,
+                    details={"session_id": None},
+                )
+            )
+            await db.commit()
+            return None, None
+
+        # Sub-case B/C: a TOTP code was supplied — verify it (SR-04).
+        if not verify_totp_code(user.mfa_secret, totp_code):
+            # Sub-case B: invalid TOTP code.
+            # Commit the audit entry BEFORE raising so the failure event is
+            # always persisted (SR-16), matching the LOGIN_FAILED pattern.
+            db.add(
+                AuditLog(
+                    user_id=user.id,
+                    action="MFA_FAILED",
+                    ip_address=None,
+                    details={"reason": "invalid_totp_code"},
+                )
+            )
+            await db.commit()
+            raise HTTPException(status_code=401, detail="Invalid TOTP code")
+
+        # Sub-case C: TOTP code is valid.  Stage the success audit log — it
+        # will be committed atomically with the session/token writes below.
         db.add(
             AuditLog(
                 user_id=user.id,
-                action="LOGIN_MFA_REQUIRED",
+                action="MFA_VERIFIED",
                 ip_address=None,
-                details={"session_id": None},
+                details={"email": user.email},
             )
         )
-        await db.commit()
-        return None, None
 
     # ------------------------------------------------------------------
     # Steps 7–16: Successful authentication path.
@@ -685,4 +737,288 @@ async def logout(
     # ------------------------------------------------------------------
     # Step 5: Commit all database mutations atomically.
     # ------------------------------------------------------------------
+    await db.commit()
+
+
+async def disable_mfa(
+    user: User,
+    password: str,
+    totp_code: str,
+    db: AsyncSession,
+) -> None:
+    """Disable MFA for the user after verifying both password and current TOTP code.
+
+    Enforces SR-04 (TOTP gate deactivation requires confirmed identity) and
+    SR-16 (audit log on MFA_FAILED and MFA_DISABLED events).
+
+    The two-factor check (password + TOTP) prevents an attacker who has only
+    stolen a valid access token from silently disabling the MFA gate.  Both
+    factors must be correct before the gate is deactivated.
+
+    The MFA_FAILED audit log entry is committed BEFORE raising the
+    HTTPException so that the failure event is always persisted regardless
+    of any exception handling above this call site.  This matches the pattern
+    used by the login and enable_mfa failure paths (SR-16).
+
+    Args:
+        user:      The authenticated User requesting MFA deactivation.
+        password:  The plaintext password to verify against the stored hash.
+        totp_code: The six-to-eight-digit TOTP code to verify against the
+                   stored secret.
+        db:        An async SQLAlchemy session for the current request.
+
+    Raises:
+        HTTPException 400: If MFA is not currently enabled on the account.
+        HTTPException 401: If the password is incorrect.
+        HTTPException 401: If the supplied TOTP code is invalid, with a
+            MFA_FAILED audit log entry committed before raising.
+    """
+    # ------------------------------------------------------------------
+    # Step 1: Reject if MFA is not currently active.
+    # There is nothing to disable on an account that has not enrolled.
+    # ------------------------------------------------------------------
+    if not user.mfa_enabled:
+        raise HTTPException(
+            status_code=400,
+            detail="MFA is not enabled",
+        )
+
+    # ------------------------------------------------------------------
+    # Step 2: Verify the supplied password.
+    # This prevents an attacker who holds a stolen access token from
+    # silently disabling MFA without knowing the account password.
+    # Commit the MFA_FAILED audit entry BEFORE raising so the failure is
+    # always persisted regardless of any exception handling above this
+    # call site (SR-16), matching the pattern used for TOTP failures.
+    # ------------------------------------------------------------------
+    if not verify_password(password, user.hashed_password):
+        db.add(
+            AuditLog(
+                user_id=user.id,
+                action="MFA_FAILED",
+                ip_address=None,
+                details={"reason": "invalid_password"},
+            )
+        )
+        await db.commit()
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid credentials",
+        )
+
+    # ------------------------------------------------------------------
+    # Step 3: Verify the TOTP code.
+    # On failure: commit the audit entry BEFORE raising so the event is
+    # always persisted (SR-16), matching the pattern used in enable_mfa
+    # and in the login MFA gate.
+    # ------------------------------------------------------------------
+    if not verify_totp_code(user.mfa_secret, totp_code):
+        db.add(
+            AuditLog(
+                user_id=user.id,
+                action="MFA_FAILED",
+                ip_address=None,
+                details={"reason": "invalid_totp_code"},
+            )
+        )
+        await db.commit()
+        raise HTTPException(status_code=401, detail="Invalid TOTP code")
+
+    # ------------------------------------------------------------------
+    # Step 4: Deactivate the MFA gate and clear the stored secret.
+    # Both mutations and the success audit entry are committed atomically
+    # so that the user state and the audit record are always consistent
+    # (SR-04, SR-16).
+    # ------------------------------------------------------------------
+    user.mfa_enabled = False
+    user.mfa_secret = None
+
+    db.add(
+        AuditLog(
+            user_id=user.id,
+            action="MFA_DISABLED",
+            ip_address=None,
+            details={"email": user.email},
+        )
+    )
+
+    await db.commit()
+
+
+async def setup_mfa(
+    user: User,
+    db: AsyncSession,
+    settings: Settings,
+) -> tuple[str, str]:
+    """Generate and store a TOTP secret for the user, returning the secret and QR code.
+
+    Enforces SR-04 (TOTP secret stored once during enrollment; never returned
+    again after this call) and SR-16 (audit log on MFA_SETUP_INITIATED event).
+
+    If ``user.mfa_enabled`` is True the call is rejected immediately — MFA
+    cannot be re-initialised without first disabling it (Phase 4).
+
+    If ``user.mfa_secret`` is already set but ``mfa_enabled`` is still False,
+    a prior setup was abandoned before verification.  The old secret is
+    overwritten silently: the abandoned secret was never confirmed by a
+    successful TOTP code submission, so it has no security value.
+
+    The QR code embeds the raw secret and is therefore as sensitive as the
+    secret itself.  Both must be transmitted over TLS and must not be cached
+    or logged.  The secret is returned to the caller exactly once; all
+    subsequent API calls must never reveal it.
+
+    Args:
+        user:     The authenticated User requesting MFA enrollment.
+        db:       An async SQLAlchemy session for the current request.
+        settings: Application settings supplying ``app_name`` as the TOTP
+                  issuer name shown inside the authenticator app.
+
+    Returns:
+        A 2-tuple ``(secret, qr_code_base64)`` where ``secret`` is the
+        Base32-encoded TOTP secret and ``qr_code_base64`` is a UTF-8
+        base64-encoded PNG image of the provisioning QR code.
+
+    Raises:
+        HTTPException 400: If MFA is already fully enabled on the account.
+    """
+    # ------------------------------------------------------------------
+    # Step 1: Reject if MFA is already active (SR-04).
+    # An already-enabled account must go through disable first (Phase 4).
+    # ------------------------------------------------------------------
+    if user.mfa_enabled:
+        raise HTTPException(
+            status_code=400,
+            detail="MFA is already enabled",
+        )
+
+    # ------------------------------------------------------------------
+    # Step 2: Generate a fresh TOTP secret (SR-04).
+    # Any previously abandoned secret (mfa_secret set, mfa_enabled False)
+    # is overwritten.  The old secret was never confirmed by a valid TOTP
+    # code, so discarding it is the correct behaviour.
+    # ------------------------------------------------------------------
+    secret = generate_totp_secret()
+    user.mfa_secret = secret
+
+    # Flush so the mfa_secret write is part of the same DB transaction
+    # before the audit log is appended.
+    await db.flush()
+
+    # ------------------------------------------------------------------
+    # Step 3: Write the audit log entry BEFORE committing (SR-16).
+    # Committing once with both the secret update and the audit row
+    # ensures the two are always consistent — either both land or neither.
+    # ------------------------------------------------------------------
+    audit = AuditLog(
+        user_id=user.id,
+        action="MFA_SETUP_INITIATED",
+        ip_address=None,
+        details={"email": user.email},
+    )
+    db.add(audit)
+    await db.commit()
+
+    # ------------------------------------------------------------------
+    # Step 4: Generate the QR code after committing.
+    # The provisioning URI is built from the confirmed-saved secret.
+    # The issuer name comes from settings.app_name (SR-04).
+    # ------------------------------------------------------------------
+    qr_code_base64 = generate_qr_code_base64(
+        secret=secret,
+        email=user.email,
+        issuer=settings.app_name,
+    )
+
+    return secret, qr_code_base64
+
+
+async def enable_mfa(
+    user: User,
+    totp_code: str,
+    db: AsyncSession,
+) -> None:
+    """Verify the first TOTP code and activate MFA for the user.
+
+    Enforces SR-04 (TOTP gate activation after confirmed enrollment) and
+    SR-16 (audit log on both MFA_ENABLED success and MFA_FAILED failure).
+
+    The caller must be an authenticated user who has already completed the
+    ``setup_mfa`` step (i.e., ``user.mfa_secret`` is set).  The first
+    successful TOTP code submission proves that the user has the correct
+    secret in their authenticator app, at which point the MFA gate is
+    activated by setting ``mfa_enabled = True``.
+
+    The MFA_FAILED audit log entry is committed BEFORE raising the
+    HTTPException so that the failure event is always persisted regardless
+    of any exception handling above this call site.  This matches the
+    pattern used by the login failure path (SR-16).
+
+    Args:
+        user:      The authenticated User requesting MFA activation.
+        totp_code: The six-to-eight-digit TOTP code submitted by the user.
+        db:        An async SQLAlchemy session for the current request.
+
+    Raises:
+        HTTPException 400: If ``user.mfa_secret`` is None (setup was never
+            initiated) or if MFA is already enabled on the account.
+        HTTPException 401: If the supplied TOTP code is invalid, with a
+            MFA_FAILED audit log entry committed before raising.
+    """
+    # ------------------------------------------------------------------
+    # Step 1: Reject if no setup was ever initiated.
+    # mfa_secret is None until setup_mfa is called.  An enable attempt
+    # before setup has no secret to verify against — reject immediately.
+    # ------------------------------------------------------------------
+    if user.mfa_secret is None:
+        raise HTTPException(
+            status_code=400,
+            detail="MFA setup not initiated",
+        )
+
+    # ------------------------------------------------------------------
+    # Step 2: Reject if MFA is already active.
+    # Re-enabling an already-enabled account is a no-op at best and a
+    # mistake at worst.  The user must disable first (Phase 4).
+    # ------------------------------------------------------------------
+    if user.mfa_enabled:
+        raise HTTPException(
+            status_code=400,
+            detail="MFA is already enabled",
+        )
+
+    # ------------------------------------------------------------------
+    # Step 3 & 4: Verify the TOTP code.
+    # verify_totp_code uses pyotp's constant-time HMAC comparison (SR-04).
+    # On failure: commit the audit log entry BEFORE raising so the event
+    # is always persisted (SR-16).
+    # ------------------------------------------------------------------
+    if not verify_totp_code(user.mfa_secret, totp_code):
+        db.add(
+            AuditLog(
+                user_id=user.id,
+                action="MFA_FAILED",
+                ip_address=None,
+                details={"reason": "invalid_totp_code"},
+            )
+        )
+        await db.commit()
+        raise HTTPException(status_code=401, detail="Invalid TOTP code")
+
+    # ------------------------------------------------------------------
+    # Step 5: Activate the MFA gate and write the success audit log.
+    # Both mutations are committed in a single atomic transaction so the
+    # user state and the audit record are always consistent (SR-16).
+    # ------------------------------------------------------------------
+    user.mfa_enabled = True
+
+    db.add(
+        AuditLog(
+            user_id=user.id,
+            action="MFA_ENABLED",
+            ip_address=None,
+            details={"email": user.email},
+        )
+    )
+
     await db.commit()

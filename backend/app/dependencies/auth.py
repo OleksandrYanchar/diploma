@@ -1,10 +1,15 @@
-"""FastAPI authentication dependency — get_current_user.
+"""FastAPI authentication dependencies — get_current_user and require_verified.
 
-Provides the ``get_current_user`` dependency, which is the Zero Trust
-gate on every authenticated endpoint.  No request reaches protected
-business logic without passing all seven verification steps defined here.
+Provides:
+- ``get_current_user``: the Zero Trust gate on every authenticated endpoint.
+  No request reaches protected business logic without passing all seven
+  verification steps defined here.
+- ``require_verified``: a secondary dependency that enforces email
+  verification.  Must be declared on every endpoint where an unverified
+  account must not have access (SR-03).
 
 Security properties enforced:
+- SR-03: Email verification status checked via ``require_verified``.
 - SR-06: JWT signature and expiry validated on every request.
 - SR-09: JTI blacklist checked so that logged-out tokens are immediately
   rejected, even within their remaining lifetime.
@@ -197,3 +202,39 @@ async def get_current_user(
     # Step 7: All checks passed — return the authenticated user.
     # ------------------------------------------------------------------
     return user
+
+
+async def require_verified(
+    current_user: User = Depends(get_current_user),
+) -> None:
+    """Enforce that the authenticated user has a verified email address.
+
+    This dependency is a secondary guard that must be declared alongside
+    ``get_current_user`` on any endpoint where unverified accounts must be
+    blocked (SR-03).  It does not return anything useful — it is a
+    side-effect-only dependency used to gate access.
+
+    Usage in a route handler signature::
+
+        async def my_endpoint(
+            current_user: User = Depends(get_current_user),
+            _verified: None = Depends(require_verified),
+        ) -> ...:
+
+    ``get_current_user`` is still required separately when the route needs
+    the ``User`` object.  ``require_verified`` only raises or returns None.
+
+    Args:
+        current_user: Authenticated User provided by ``get_current_user``.
+
+    Returns:
+        None (used solely for its side effect).
+
+    Raises:
+        HTTPException 403: If ``current_user.is_verified`` is False (SR-03).
+    """
+    if not current_user.is_verified:
+        raise HTTPException(
+            status_code=403,
+            detail="Email address is not verified",
+        )

@@ -110,7 +110,7 @@ This document defines the implementation sequence in eight phases. Each phase ha
 - `POST /auth/mfa/enable` — confirms enrollment by validating first TOTP code
 - `POST /auth/mfa/disable` — disables MFA after password confirmation
 - Login flow updated: if `mfa_enabled=true`, TOTP code required before tokens are issued
-- Audit logging for: MFA_ENABLED, MFA_DISABLED, MFA_VERIFIED, MFA_FAILED
+- Audit logging for: MFA_SETUP_INITIATED, MFA_ENABLED, MFA_DISABLED, MFA_VERIFIED, MFA_FAILED, LOGIN_MFA_REQUIRED
 
 **Dependencies:** Phase 2 (login flow must exist before MFA can be layered in).
 
