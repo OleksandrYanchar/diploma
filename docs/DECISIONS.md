@@ -363,6 +363,59 @@ The Phase 2 email verification flow stores a SHA-256-hashed verification token i
 
 ---
 
+## ADR-19 — TOTP `valid_window=1` and Replay Risk
+
+**Status:** Accepted
+
+**Context:**  
+`pyotp.TOTP.verify(code, valid_window=1)` accepts a submitted TOTP code if it matches the current 30-second window or either of the immediately adjacent windows (±1), giving an effective validity range of approximately 90 seconds.  The alternative, `valid_window=0`, restricts acceptance to the exact current 30-second window.
+
+**Options considered:**
+
+| Option | Clock skew tolerance | Replay window |
+|--------|---------------------|---------------|
+| `valid_window=0` (strict) | None — codes fail if client and server clocks differ by >30 s | 30 seconds (current window only) |
+| `valid_window=1` (chosen) | ±30 seconds | ~90 seconds (current ± adjacent windows) |
+
+**Decision:** Use `valid_window=1`.
+
+**Rationale:** NIST SP 800-63B permits a brief acceptance window to accommodate client/server clock skew, which is common in mobile devices and across time zones.  Rejecting valid codes due to minor clock drift would produce a poor user experience with no commensurate security benefit.  `valid_window=1` is the `pyotp` default and the widely accepted production practice.
+
+**Accepted risk:** A captured TOTP code is replayable within the ~90-second validity window.  This residual risk is documented in `THREAT_MODEL.md`.
+
+**Planned mitigation (deferred from MVP):** Per-code Redis tracking — record `(user_id, code, window_ts)` on first use and reject a second presentation of the same code within the same window.  Deferred due to the additional Redis hot-path write cost and MVP scope constraints.
+
+**Consequences:** The TOTP gate provides strong second-factor protection under normal conditions.  The replay window is narrow enough that exploitation requires a real-time attack (intercept and replay within ~90 seconds).  The mitigation is documented and can be added without changing the surrounding auth flow.
+
+---
+
+## ADR-20 — Plaintext `mfa_secret` Storage
+
+**Status:** Accepted (MVP); encryption recommended before production use.
+
+**Context:**  
+The TOTP secret is stored in `users.mfa_secret` as a raw Base32 string.  Two encryption approaches were considered: application-level Fernet encryption (key from `settings`) and PostgreSQL `pgcrypto` column encryption.  Both provide at-rest protection for the secret but add key management complexity.
+
+**Options considered:**
+
+| Option | Protection | Additional complexity |
+|--------|-----------|----------------------|
+| Plaintext (chosen for MVP) | None — DB compromise exposes secrets directly | None |
+| Fernet encryption (application-level) | Protects against DB-only compromise | Key rotation tooling, boot-time key loading, migration of existing rows |
+| pgcrypto column encryption | Same protection, DB-native | Requires pgcrypto extension, migration, key management |
+
+**Decision:** Store `mfa_secret` as plaintext for the MVP thesis scope.
+
+**Rationale:** Both encryption options require a key management lifecycle (secure storage, rotation, migration tooling) that is outside the MVP thesis scope.  The thesis demonstrates the TOTP enrollment and verification flow; encryption at rest is an infrastructure hardening concern orthogonal to the security mechanism being evaluated.  The risk is acknowledged and documented.
+
+**Accepted risk:** A database compromise exposes TOTP secrets directly, allowing an attacker to clone any user's TOTP authenticator.  Documented in `THREAT_MODEL.md` residual risks.
+
+**Production recommendation:** Encrypt `mfa_secret` at rest using Fernet with a key sourced from a secrets manager (e.g., HashiCorp Vault, AWS Secrets Manager) before storing.  The `String` column type already accommodates encrypted ciphertext without a schema migration.
+
+**Consequences:** No additional dependencies or key management in the MVP.  Before any production deployment, `mfa_secret` must be encrypted.  A migration utility must re-encrypt existing rows on key introduction.
+
+---
+
 ## ADR-14 — Frontend Toolchain: npm + ESLint + Prettier + TypeScript Strict
 
 **Status:** Accepted

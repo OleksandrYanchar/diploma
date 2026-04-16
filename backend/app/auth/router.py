@@ -49,7 +49,7 @@ from app.core.config import Settings, get_settings
 from app.core.database import get_db
 from app.core.redis import get_redis
 from app.core.security import decode_access_token
-from app.dependencies.auth import get_current_user
+from app.dependencies.auth import get_current_user, require_verified
 from app.models.user import User
 from app.schemas.auth import (
     LoginRequest,
@@ -339,6 +339,7 @@ async def logout(
 )
 async def mfa_setup(
     current_user: User = Depends(get_current_user),
+    _verified: None = Depends(require_verified),
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> MFASetupResponse:
@@ -389,6 +390,7 @@ async def mfa_setup(
 async def mfa_enable(
     body: MFAEnableRequest,
     current_user: User = Depends(get_current_user),
+    _verified: None = Depends(require_verified),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, str]:
     """Verify the first TOTP code and activate MFA on the authenticated account.
@@ -434,6 +436,7 @@ async def mfa_enable(
 async def mfa_disable(
     body: MFADisableRequest,
     current_user: User = Depends(get_current_user),
+    _verified: None = Depends(require_verified),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, str]:
     """Deactivate the MFA gate on the authenticated account.

@@ -861,6 +861,18 @@ async def test_mfa_disable_wrong_password_returns_401(
     assert user is not None
     assert user.mfa_enabled is True, "mfa_enabled must remain True after wrong password"
 
+    # An MFA_FAILED audit entry must have been committed before the 401 (SR-16).
+    audit_result = await db_session.execute(
+        select(AuditLog).where(
+            AuditLog.action == "MFA_FAILED",
+            AuditLog.user_id == uuid.UUID(user_id),
+        )
+    )
+    log_entry: AuditLog | None = audit_result.scalar_one_or_none()
+    assert log_entry is not None, "Expected MFA_FAILED audit log after wrong password"
+    assert log_entry.details is not None
+    assert log_entry.details.get("reason") == "invalid_password"
+
 
 @pytest.mark.asyncio
 async def test_mfa_disable_bad_totp_returns_401_and_writes_mfa_failed_audit(
@@ -956,6 +968,112 @@ async def test_mfa_disable_unauthenticated_returns_403(
     response = await async_client.post(
         _MFA_DISABLE_URL,
         json={"password": _STRONG_PASSWORD, "totp_code": "123456"},
+    )
+
+    assert response.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Fix 1 — require_verified on MFA routes
+# ---------------------------------------------------------------------------
+# Helper: register and login WITHOUT verifying email.
+# The login service issues tokens regardless of verification status;
+# require_verified enforced at endpoint level, not at login.
+
+
+async def _register_and_login_unverified(
+    async_client: AsyncClient,
+    email: str,
+) -> str:
+    """Register a user without verifying their email, then log in.
+
+    Returns the access token so unverified callers can attempt MFA endpoints.
+
+    Args:
+        async_client: Test HTTP client fixture.
+        email:        Email address to register.
+
+    Returns:
+        The access token string for the unverified user.
+    """
+    reg_resp = await async_client.post(
+        _REGISTER_URL,
+        json={"email": email, "password": _STRONG_PASSWORD},
+    )
+    assert reg_resp.status_code == 201
+
+    # Log in WITHOUT calling /auth/verify-email.
+    login_resp = await async_client.post(
+        _LOGIN_URL,
+        json={"email": email, "password": _STRONG_PASSWORD},
+    )
+    assert login_resp.status_code == 200
+    return login_resp.json()["access_token"]
+
+
+@pytest.mark.asyncio
+async def test_unverified_user_cannot_setup_mfa(
+    async_client: AsyncClient,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """POST /auth/mfa/setup returns 403 for an unverified user (SR-03).
+
+    ``require_verified`` must block access to the setup endpoint before
+    any service logic runs.  An unverified user with a valid Bearer token
+    must receive HTTP 403.
+    """
+    email = "unverified_setup@example.com"
+    access_token = await _register_and_login_unverified(async_client, email)
+
+    response = await async_client.post(
+        _MFA_SETUP_URL,
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_unverified_user_cannot_enable_mfa(
+    async_client: AsyncClient,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """POST /auth/mfa/enable returns 403 for an unverified user (SR-03).
+
+    ``require_verified`` must block access to the enable endpoint before
+    any service logic runs.  An unverified user with a valid Bearer token
+    must receive HTTP 403.
+    """
+    email = "unverified_enable@example.com"
+    access_token = await _register_and_login_unverified(async_client, email)
+
+    response = await async_client.post(
+        _MFA_ENABLE_URL,
+        json={"totp_code": "123456"},
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_unverified_user_cannot_disable_mfa(
+    async_client: AsyncClient,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """POST /auth/mfa/disable returns 403 for an unverified user (SR-03).
+
+    ``require_verified`` must block access to the disable endpoint before
+    any service logic runs.  An unverified user with a valid Bearer token
+    must receive HTTP 403.
+    """
+    email = "unverified_disable@example.com"
+    access_token = await _register_and_login_unverified(async_client, email)
+
+    response = await async_client.post(
+        _MFA_DISABLE_URL,
+        json={"password": _STRONG_PASSWORD, "totp_code": "123456"},
+        headers={"Authorization": f"Bearer {access_token}"},
     )
 
     assert response.status_code == 403

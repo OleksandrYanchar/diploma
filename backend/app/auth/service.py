@@ -787,11 +787,20 @@ async def disable_mfa(
     # Step 2: Verify the supplied password.
     # This prevents an attacker who holds a stolen access token from
     # silently disabling MFA without knowing the account password.
-    # No audit log is written here — password failure is an immediate
-    # rejection that does not require a persistent audit record for the
-    # disable flow (only TOTP failures are audited in this operation).
+    # Commit the MFA_FAILED audit entry BEFORE raising so the failure is
+    # always persisted regardless of any exception handling above this
+    # call site (SR-16), matching the pattern used for TOTP failures.
     # ------------------------------------------------------------------
     if not verify_password(password, user.hashed_password):
+        db.add(
+            AuditLog(
+                user_id=user.id,
+                action="MFA_FAILED",
+                ip_address=None,
+                details={"reason": "invalid_password"},
+            )
+        )
+        await db.commit()
         raise HTTPException(
             status_code=401,
             detail="Invalid credentials",

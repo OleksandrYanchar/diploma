@@ -189,7 +189,12 @@ Tests that verify audit log creation.
 - After failed login: AuditLog entry with action=LOGIN_FAILED
 - After logout: AuditLog entry with action=LOGOUT
 - After transfer: AuditLog entry with action=TRANSFER_COMPLETED
+- After MFA setup initiated: AuditLog entry with action=MFA_SETUP_INITIATED
 - After MFA enable: AuditLog entry with action=MFA_ENABLED
+- After MFA disable: AuditLog entry with action=MFA_DISABLED
+- After MFA TOTP verification at login: AuditLog entry with action=MFA_VERIFIED
+- After MFA TOTP verification failure: AuditLog entry with action=MFA_FAILED
+- After login halted for missing TOTP code: AuditLog entry with action=LOGIN_MFA_REQUIRED
 - After account lockout: AuditLog entry with action=ACCOUNT_LOCKED
 - After step-up verification: AuditLog entry with action=STEP_UP_VERIFIED
 
