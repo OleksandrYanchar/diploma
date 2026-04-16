@@ -51,7 +51,9 @@ from sqlalchemy.ext.asyncio import (  # noqa: E402
 from app.core.config import Settings  # noqa: E402
 from app.core.database import Base  # noqa: E402
 from app.core.redis import get_redis  # noqa: E402
+from app.core.security import create_access_token, hash_password  # noqa: E402
 from app.main import app  # noqa: E402
+from app.models.user import User, UserRole  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Settings override
@@ -231,3 +233,148 @@ async def async_client(
     # original state.  This prevents override state from affecting other tests
     # that run in the same process.
     app.dependency_overrides.clear()
+
+
+# ---------------------------------------------------------------------------
+# Role-specific user fixtures (Phase 4)
+# ---------------------------------------------------------------------------
+# Each fixture creates a User row directly via the ORM (no HTTP round-trip)
+# and issues an access token using the same test settings used by
+# async_client.  Only an access token is returned — refresh tokens are not
+# needed for dependency unit tests or role-gated endpoint tests.
+#
+# A synthetic session_id is embedded in every token so that get_current_user's
+# Redis session check (step 4) can be satisfied in integration tests by
+# seeding fake_redis with session:{session_id} = str(user.id).
+# ---------------------------------------------------------------------------
+
+_FIXTURE_SESSION_ID = "00000000-0000-0000-0000-000000000001"
+
+
+@pytest.fixture()
+async def verified_user(db_session: AsyncSession) -> tuple[User, str]:
+    """Create a verified USER-role account and return (user, access_token).
+
+    The User is inserted directly into the test database via the ORM.
+    The access token is signed with the same test settings used by
+    ``async_client``.  No refresh token is issued.
+
+    Security properties demonstrated:
+    - is_verified=True — satisfies the require_verified gate (SR-03).
+    - role=UserRole.USER — least-privilege default role (SR-11).
+    """
+    user = User(
+        email="testuser_verified@example.com",
+        hashed_password=hash_password("TestPassword123!"),
+        role=UserRole.USER,
+        is_active=True,
+        is_verified=True,
+    )
+    db_session.add(user)
+    await db_session.commit()
+    await db_session.refresh(user)
+
+    token = create_access_token(
+        subject=str(user.id),
+        role=user.role.value,
+        session_id=_FIXTURE_SESSION_ID,
+        settings=_TEST_SETTINGS,
+    )
+    return user, token
+
+
+@pytest.fixture()
+async def admin_user(db_session: AsyncSession) -> tuple[User, str]:
+    """Create a verified ADMIN-role account and return (user, access_token).
+
+    The User is inserted directly into the test database via the ORM.
+    The access token is signed with the same test settings used by
+    ``async_client``.  No refresh token is issued.
+
+    Security properties demonstrated:
+    - is_verified=True — satisfies the require_verified gate (SR-03).
+    - role=UserRole.ADMIN — full-access administrative role (SR-11).
+    """
+    user = User(
+        email="testuser_admin@example.com",
+        hashed_password=hash_password("TestPassword123!"),
+        role=UserRole.ADMIN,
+        is_active=True,
+        is_verified=True,
+    )
+    db_session.add(user)
+    await db_session.commit()
+    await db_session.refresh(user)
+
+    token = create_access_token(
+        subject=str(user.id),
+        role=user.role.value,
+        session_id=_FIXTURE_SESSION_ID,
+        settings=_TEST_SETTINGS,
+    )
+    return user, token
+
+
+@pytest.fixture()
+async def auditor_user(db_session: AsyncSession) -> tuple[User, str]:
+    """Create a verified AUDITOR-role account and return (user, access_token).
+
+    The User is inserted directly into the test database via the ORM.
+    The access token is signed with the same test settings used by
+    ``async_client``.  No refresh token is issued.
+
+    Security properties demonstrated:
+    - is_verified=True — satisfies the require_verified gate (SR-03).
+    - role=UserRole.AUDITOR — read-only audit role (SR-11).
+    """
+    user = User(
+        email="testuser_auditor@example.com",
+        hashed_password=hash_password("TestPassword123!"),
+        role=UserRole.AUDITOR,
+        is_active=True,
+        is_verified=True,
+    )
+    db_session.add(user)
+    await db_session.commit()
+    await db_session.refresh(user)
+
+    token = create_access_token(
+        subject=str(user.id),
+        role=user.role.value,
+        session_id=_FIXTURE_SESSION_ID,
+        settings=_TEST_SETTINGS,
+    )
+    return user, token
+
+
+@pytest.fixture()
+async def unverified_user(db_session: AsyncSession) -> tuple[User, str]:
+    """Create an unverified USER-role account and return (user, access_token).
+
+    The User is inserted directly into the test database via the ORM with
+    is_verified=False, simulating a registered but not yet email-verified account.
+    The access token is signed with the same test settings used by
+    ``async_client``.  No refresh token is issued.
+
+    Security properties demonstrated:
+    - is_verified=False — must be rejected by require_verified (SR-03).
+    - role=UserRole.USER — least-privilege default role (SR-11).
+    """
+    user = User(
+        email="testuser_unverified@example.com",
+        hashed_password=hash_password("TestPassword123!"),
+        role=UserRole.USER,
+        is_active=True,
+        is_verified=False,
+    )
+    db_session.add(user)
+    await db_session.commit()
+    await db_session.refresh(user)
+
+    token = create_access_token(
+        subject=str(user.id),
+        role=user.role.value,
+        session_id=_FIXTURE_SESSION_ID,
+        settings=_TEST_SETTINGS,
+    )
+    return user, token
