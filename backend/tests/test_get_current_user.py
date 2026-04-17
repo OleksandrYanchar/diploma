@@ -23,6 +23,8 @@ import jwt as pyjwt
 import pytest
 from fastapi import Depends
 from httpx import AsyncClient
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.dependencies.auth import get_current_user
@@ -269,3 +271,60 @@ async def test_protected_endpoint_rejects_blacklisted_token(
         headers={"Authorization": f"Bearer {access_token}"},
     )
     assert response.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Deactivated / locked user rejection (Steps 6–7 of get_current_user)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_protected_endpoint_rejects_deactivated_user(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A deactivated user's valid token is rejected with 403 by get_current_user.
+
+    Even if the JWT is cryptographically valid and the Redis session exists,
+    a user with is_active=False must be rejected at step 6 (SR-05).
+    """
+    email = "dep_deactivated@example.com"
+    access_token = await _register_verify_login(async_client, capsys, email)
+
+    result = await db_session.execute(select(User).where(User.email == email))
+    user = result.scalar_one()
+    user.is_active = False
+    await db_session.commit()
+
+    resp = await async_client.get(
+        _PROTECTED_URL,
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_protected_endpoint_rejects_locked_user(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A locked user's valid token is rejected with 403 by get_current_user.
+
+    Even if the JWT and Redis session are valid, a user whose locked_until
+    is in the future must be rejected at step 7 (SR-05).
+    """
+    email = "dep_locked@example.com"
+    access_token = await _register_verify_login(async_client, capsys, email)
+
+    result = await db_session.execute(select(User).where(User.email == email))
+    user = result.scalar_one()
+    user.locked_until = datetime.now(tz=timezone.utc) + timedelta(hours=1)
+    await db_session.commit()
+
+    resp = await async_client.get(
+        _PROTECTED_URL,
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    assert resp.status_code == 403

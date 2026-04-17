@@ -516,6 +516,28 @@ async def test_mfa_enable_when_already_enabled_returns_400(
 
 
 @pytest.mark.asyncio
+async def test_mfa_enable_missing_totp_code_returns_422(
+    async_client: AsyncClient,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """POST /auth/mfa/enable with an empty body returns 422.
+
+    The ``MFAEnableRequest`` schema requires a ``totp_code`` field. Omitting it
+    must trigger Pydantic validation failure (422) before service logic runs.
+    """
+    email = "mfa_enable_no_code@example.com"
+    _user_id, access_token = await _register_verify_login(async_client, capsys, email)
+    await _setup_mfa_and_get_secret(async_client, access_token)
+
+    resp = await async_client.post(
+        _MFA_ENABLE_URL,
+        json={},
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
 async def test_mfa_enable_unauthenticated_returns_403(
     async_client: AsyncClient,
 ) -> None:
@@ -953,6 +975,38 @@ async def test_mfa_disable_when_mfa_not_enabled_returns_400(
 
     assert response.status_code == 400
     assert "not enabled" in response.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"password": "StrongPass1!"},
+        {"totp_code": "123456"},
+        {},
+    ],
+    ids=["missing-totp", "missing-password", "empty-body"],
+)
+async def test_mfa_disable_missing_fields_returns_422(
+    async_client: AsyncClient,
+    capsys: pytest.CaptureFixture[str],
+    body: dict,
+) -> None:
+    """POST /auth/mfa/disable with missing required fields returns 422.
+
+    The ``MFADisableRequest`` schema requires both ``password`` and
+    ``totp_code`` fields. Omitting either must trigger Pydantic validation
+    failure before any service logic runs.
+    """
+    email = f"mfa_dis_422_{id(body)}@example.com"
+    _user_id, access_token = await _register_verify_login(async_client, capsys, email)
+
+    resp = await async_client.post(
+        _MFA_DISABLE_URL,
+        json=body,
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    assert resp.status_code == 422
 
 
 @pytest.mark.asyncio

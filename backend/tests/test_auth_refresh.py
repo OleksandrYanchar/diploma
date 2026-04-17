@@ -353,3 +353,16 @@ async def test_refresh_audit_log_written(
     assert log_entry is not None, "Expected a TOKEN_REFRESHED audit log entry"
     assert log_entry.details is not None
     assert "session_id" in log_entry.details
+
+
+@pytest.mark.asyncio
+async def test_refresh_missing_token_returns_422(
+    async_client: AsyncClient,
+) -> None:
+    """POST /auth/refresh without refresh_token in the body returns 422.
+
+    The ``RefreshRequest`` schema requires a ``refresh_token`` field. Omitting
+    it must trigger Pydantic validation failure (422).
+    """
+    resp = await async_client.post(_REFRESH_URL, json={})
+    assert resp.status_code == 422

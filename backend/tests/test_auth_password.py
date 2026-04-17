@@ -301,3 +301,69 @@ async def test_password_change_does_not_revoke_existing_session(
     assert (
         me_resp.status_code == 200
     ), "Session must remain valid after password change (ADR-21 behaviour)"
+
+
+@pytest.mark.asyncio
+async def test_password_change_missing_new_password_returns_422(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    fake_redis,
+) -> None:
+    """POST /auth/password/change without new_password in body returns 422.
+
+    The ``PasswordChangeRequest`` schema requires both ``current_password`` and
+    ``new_password``. Omitting either must trigger Pydantic validation failure.
+    """
+    email = f"pw_missing_{uuid.uuid4().hex[:8]}@example.com"
+    user, access_token = await _make_verified_user(db_session, email)
+    await fake_redis.set(f"session:{_FIXTURE_SESSION_ID}", str(user.id))
+
+    resp = await async_client.post(
+        _PASSWORD_CHANGE_URL,
+        json={"current_password": _STRONG_PASSWORD},
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_password_change_unverified_user_allowed(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    fake_redis,
+) -> None:
+    """Unverified users can change their password (no require_verified).
+
+    Per the implementation, POST /auth/password/change depends only on
+    get_current_user, not require_verified. An unverified user with a valid
+    session must be able to change their password.
+    """
+    email = f"pw_unverified_{uuid.uuid4().hex[:8]}@example.com"
+    user = User(
+        email=email,
+        hashed_password=hash_password(_STRONG_PASSWORD),
+        role=UserRole.USER,
+        is_active=True,
+        is_verified=False,
+    )
+    db_session.add(user)
+    await db_session.commit()
+    await db_session.refresh(user)
+
+    token = create_access_token(
+        subject=str(user.id),
+        role=user.role.value,
+        session_id=_FIXTURE_SESSION_ID,
+        settings=_TEST_SETTINGS,
+    )
+    await fake_redis.set(f"session:{_FIXTURE_SESSION_ID}", str(user.id))
+
+    resp = await async_client.post(
+        _PASSWORD_CHANGE_URL,
+        json={
+            "current_password": _STRONG_PASSWORD,
+            "new_password": _NEW_STRONG_PASSWORD,
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200

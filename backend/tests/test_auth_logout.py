@@ -317,3 +317,55 @@ async def test_logout_requires_authentication(
         json={"refresh_token": "some-token-value"},
     )
     assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_logout_missing_refresh_token_returns_422(
+    async_client: AsyncClient,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """POST /auth/logout without refresh_token in the body returns 422.
+
+    The ``LogoutRequest`` schema requires a ``refresh_token`` field. Omitting it
+    must trigger Pydantic validation failure (422) before any service logic
+    runs.
+    """
+    email = "logout_missing_rt@example.com"
+    access_token, _ = await _register_verify_login(async_client, capsys, email)
+
+    resp = await async_client.post(
+        _LOGOUT_URL,
+        json={},
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_logout_blacklisted_token_rejected_on_subsequent_request(
+    async_client: AsyncClient,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """After logout, using the blacklisted access token to logout again returns 401.
+
+    The JTI blacklist (SR-09) must prevent any reuse of the access token,
+    including a second logout attempt.
+    """
+    email = "logout_double@example.com"
+    access_token, refresh_token = await _register_verify_login(
+        async_client, capsys, email
+    )
+
+    first = await async_client.post(
+        _LOGOUT_URL,
+        json={"refresh_token": refresh_token},
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    assert first.status_code == 200
+
+    second = await async_client.post(
+        _LOGOUT_URL,
+        json={"refresh_token": refresh_token},
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    assert second.status_code == 401

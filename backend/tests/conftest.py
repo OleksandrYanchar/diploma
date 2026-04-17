@@ -81,7 +81,12 @@ _TEST_SETTINGS = Settings(
 # check_same_thread=False is required for SQLite when used with async drivers
 # because SQLAlchemy may access the connection from different coroutines.
 # ---------------------------------------------------------------------------
-_SQLITE_URL = "sqlite+aiosqlite:///:memory:"
+_SQLITE_FILE = os.environ.get("TEST_SQLITE_FILE")
+_SQLITE_URL = (
+    f"sqlite+aiosqlite:///{_SQLITE_FILE}"
+    if _SQLITE_FILE
+    else "sqlite+aiosqlite:///:memory:"
+)
 
 _test_engine = create_async_engine(
     _SQLITE_URL,
@@ -121,8 +126,9 @@ async def create_tables() -> AsyncGenerator[None, None]:
 
     yield
 
-    async with _test_engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
+    if not _SQLITE_FILE:
+        async with _test_engine.begin() as conn:
+            await conn.run_sync(Base.metadata.drop_all)
 
     await _test_engine.dispose()
 

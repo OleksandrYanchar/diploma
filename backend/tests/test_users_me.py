@@ -238,3 +238,65 @@ async def test_get_me_response_is_own_profile_not_another_users(
     assert response_b.status_code == 200
     assert response_b.json()["email"] == user_b.email
     assert response_b.json()["email"] != user_a.email
+
+
+@pytest.mark.asyncio
+async def test_get_me_contains_all_expected_fields_and_no_internal_fields(
+    async_client: AsyncClient,
+    fake_redis: fakeredis.FakeRedis,
+    db_session: AsyncSession,
+) -> None:
+    """GET /users/me response contains the public UserResponse fields only.
+
+    Verifies that all expected public fields are present and all internal/sensitive
+    ORM fields are absent from the serialised response. This is the single
+    authoritative field-boundary test (SR-02, SR-04).
+    """
+    user = User(
+        email="testuser_field_check@example.com",
+        hashed_password=hash_password("TestPassword123!"),
+        role=UserRole.USER,
+        is_active=True,
+        is_verified=True,
+    )
+    db_session.add(user)
+    await db_session.commit()
+    await db_session.refresh(user)
+
+    token = create_access_token(
+        subject=str(user.id),
+        role=user.role.value,
+        session_id=_SECOND_SESSION_ID,
+        settings=_TEST_SETTINGS,
+    )
+    await fake_redis.set(f"session:{_SECOND_SESSION_ID}", str(user.id))
+
+    resp = await async_client.get(
+        "/api/v1/users/me",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+
+    expected_keys = {
+        "id",
+        "email",
+        "role",
+        "is_active",
+        "is_verified",
+        "mfa_enabled",
+        "created_at",
+        "updated_at",
+    }
+    missing = expected_keys - body.keys()
+    assert not missing, f"Missing expected public fields: {missing}"
+
+    forbidden_keys = {
+        "hashed_password",
+        "mfa_secret",
+        "failed_login_count",
+        "locked_until",
+        "email_verification_token_hash",
+    }
+    leaked = forbidden_keys & body.keys()
+    assert not leaked, f"Internal fields leaked in response: {leaked}"
