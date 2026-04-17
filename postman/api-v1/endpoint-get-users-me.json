@@ -1,0 +1,41 @@
+{
+  "method": "GET",
+  "path": "/api/v1/users/me",
+  "authentication": "Bearer access JWT",
+  "headers": {
+    "Authorization": "Bearer {{access_token}}"
+  },
+  "scenarios": {
+    "success": {
+      "description": "Works for verified and unverified users (no require_verified on this route).",
+      "headers": {
+        "Authorization": "Bearer {{access_token}}"
+      },
+      "expectedStatus": 200
+    },
+    "failure_missing_authorization_403": {
+      "headers": {},
+      "expectedStatus": 403
+    },
+    "failure_invalid_or_expired_token_401": {
+      "headers": {
+        "Authorization": "Bearer invalid.jwt.here"
+      },
+      "expectedStatus": 401
+    },
+    "failure_revoked_blacklisted_or_no_session_401": {
+      "description": "Valid signature but JTI blacklisted, or Redis session missing, etc.",
+      "headers": {
+        "Authorization": "Bearer {{access_token_after_logout}}"
+      },
+      "expectedStatus": 401
+    },
+    "failure_locked_or_deactivated_403": {
+      "description": "get_current_user may return 403 for inactive/locked accounts depending on implementation.",
+      "headers": {
+        "Authorization": "Bearer {{access_token_locked_user}}"
+      },
+      "expectedStatus": 403
+    }
+  }
+}

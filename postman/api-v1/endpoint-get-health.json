@@ -1,0 +1,14 @@
+{
+  "method": "GET",
+  "path": "/api/v1/health",
+  "authentication": "none",
+  "scenarios": {
+    "success": {
+      "description": "Public liveness probe; returns status and app version.",
+      "query": {},
+      "headers": {},
+      "body": null,
+      "expectedStatus": 200
+    }
+  }
+}

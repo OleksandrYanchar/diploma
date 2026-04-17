@@ -274,3 +274,4 @@ pyrightconfig.json
 # Local files
 .DS_Store
 .claude/agent-memory/
+*.sqlite

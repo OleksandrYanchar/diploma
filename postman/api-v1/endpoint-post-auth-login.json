@@ -1,0 +1,82 @@
+{
+  "method": "POST",
+  "path": "/api/v1/auth/login",
+  "authentication": "none",
+  "contentType": "application/json",
+  "scenarios": {
+    "success_no_mfa": {
+      "description": "Verified user without MFA → TokenResponse.",
+      "body": {
+        "email": "user@example.com",
+        "password": "CorrectPassword1!"
+      },
+      "expectedStatus": 200
+    },
+    "success_with_mfa_totp": {
+      "description": "MFA-enabled user supplies valid TOTP → TokenResponse.",
+      "body": {
+        "email": "mfa.user@example.com",
+        "password": "CorrectPassword1!",
+        "totp_code": "123456"
+      },
+      "expectedStatus": 200
+    },
+    "mfa_required_password_ok_no_totp": {
+      "description": "MFA account, valid password, totp_code omitted → 200 MFARequiredResponse.",
+      "body": {
+        "email": "mfa.user@example.com",
+        "password": "CorrectPassword1!"
+      },
+      "expectedStatus": 200
+    },
+    "failure_invalid_credentials_401": {
+      "description": "Wrong email or password.",
+      "body": {
+        "email": "user@example.com",
+        "password": "WrongPassword1!"
+      },
+      "expectedStatus": 401
+    },
+    "failure_mfa_wrong_totp_401": {
+      "description": "MFA account with wrong TOTP after password ok.",
+      "body": {
+        "email": "mfa.user@example.com",
+        "password": "CorrectPassword1!",
+        "totp_code": "000000"
+      },
+      "expectedStatus": 401
+    },
+    "failure_account_locked_or_deactivated_403": {
+      "description": "Locked or inactive account.",
+      "body": {
+        "email": "locked@example.com",
+        "password": "CorrectPassword1!"
+      },
+      "expectedStatus": 403
+    },
+    "validation_totp_code_too_short_schema_422": {
+      "description": "totp_code set but shorter than 6 chars → 422.",
+      "body": {
+        "email": "user@example.com",
+        "password": "x",
+        "totp_code": "12"
+      },
+      "expectedStatus": 422
+    },
+    "validation_empty_password_schema_422": {
+      "description": "password min_length 1 violated.",
+      "body": {
+        "email": "user@example.com",
+        "password": ""
+      },
+      "expectedStatus": 422
+    },
+    "validation_invalid_email_schema_422": {
+      "body": {
+        "email": "bad",
+        "password": "x"
+      },
+      "expectedStatus": 422
+    }
+  }
+}

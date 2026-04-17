@@ -1,0 +1,47 @@
+{
+  "method": "POST",
+  "path": "/api/v1/auth/logout",
+  "authentication": "Bearer access JWT (Authorization header)",
+  "contentType": "application/json",
+  "headers": {
+    "Authorization": "Bearer {{access_token}}"
+  },
+  "scenarios": {
+    "success": {
+      "description": "Valid access + refresh; blacklists JTI, revokes refresh, clears session.",
+      "headers": {
+        "Authorization": "Bearer {{access_token}}"
+      },
+      "body": {
+        "refresh_token": "{{refresh_token}}"
+      },
+      "expectedStatus": 200
+    },
+    "failure_missing_authorization_403": {
+      "description": "HTTPBearer: no Authorization header.",
+      "headers": {},
+      "body": {
+        "refresh_token": "{{refresh_token}}"
+      },
+      "expectedStatus": 403
+    },
+    "failure_invalid_access_token_401": {
+      "headers": {
+        "Authorization": "Bearer invalid.jwt.here"
+      },
+      "body": {
+        "refresh_token": "{{refresh_token}}"
+      },
+      "expectedStatus": 401
+    },
+    "validation_empty_refresh_in_body_schema_422": {
+      "headers": {
+        "Authorization": "Bearer {{access_token}}"
+      },
+      "body": {
+        "refresh_token": ""
+      },
+      "expectedStatus": 422
+    }
+  }
+}

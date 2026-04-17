@@ -1,0 +1,50 @@
+{
+  "method": "POST",
+  "path": "/api/v1/auth/mfa/enable",
+  "authentication": "Bearer + email verified",
+  "contentType": "application/json",
+  "headers": {
+    "Authorization": "Bearer {{access_token_verified}}"
+  },
+  "scenarios": {
+    "success_valid_first_totp": {
+      "description": "After /mfa/setup, first correct code from authenticator.",
+      "body": {
+        "totp_code": "123456"
+      },
+      "expectedStatus": 200
+    },
+    "failure_invalid_totp_401": {
+      "body": {
+        "totp_code": "000000"
+      },
+      "expectedStatus": 401
+    },
+    "failure_no_prior_setup_or_already_enabled_400": {
+      "description": "No mfa_secret from setup, or MFA already enabled.",
+      "body": {
+        "totp_code": "123456"
+      },
+      "expectedStatus": 400
+    },
+    "failure_unverified_403": {
+      "headers": {
+        "Authorization": "Bearer {{access_token_unverified}}"
+      },
+      "body": {
+        "totp_code": "123456"
+      },
+      "expectedStatus": 403
+    },
+    "validation_totp_too_short_schema_422": {
+      "body": {
+        "totp_code": "12345"
+      },
+      "expectedStatus": 422
+    },
+    "validation_missing_body_schema_422": {
+      "body": {},
+      "expectedStatus": 422
+    }
+  }
+}
