@@ -77,6 +77,7 @@ addopts = "--cov=app --cov-report=term-missing --cov-config=pyproject.toml"
 # ---------------------------------------------------------------------------
 [tool.coverage.run]
 source = ["app"]
+concurrency = ["greenlet", "thread"]
 omit = [
     "app/alembic/*",
     "app/__main__.py",

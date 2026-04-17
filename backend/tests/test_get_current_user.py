@@ -247,6 +247,7 @@ async def test_protected_endpoint_rejects_deactivated_user(
         headers={"Authorization": f"Bearer {access_token}"},
     )
     assert resp.status_code == 403
+    assert resp.json()["detail"] == "Account is deactivated"
 
 
 @pytest.mark.asyncio
@@ -273,3 +274,70 @@ async def test_protected_endpoint_rejects_locked_user(
         headers={"Authorization": f"Bearer {access_token}"},
     )
     assert resp.status_code == 403
+    assert resp.json()["detail"] == "Account is temporarily locked"
+
+
+# ---------------------------------------------------------------------------
+# ORM-fixture variants for direct coverage of steps 5–7
+#
+# The register-verify-login tests above prove the behaviour but use a complex
+# async context (multiple ASGI round-trips within the same session).
+# Coverage.py sometimes loses trace context across ASGI transport boundaries.
+# These ORM-based tests exercise the same branches with a simpler setup
+# (direct ORM insert + manual Redis seed) so that coverage can track them.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_locked_user_rejected_via_orm_fixture(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    fake_redis: object,
+) -> None:
+    """Locked-user rejection via ORM fixture — exercises get_current_user step 6.
+
+    Creates the user directly via ORM and seeds the Redis session manually,
+    avoiding the multi-step register-verify-login API flow.  This ensures
+    the locked_until branch in get_current_user is visible to coverage.py.
+    """
+    from tests.helpers import make_orm_user
+
+    user, access_token = await make_orm_user(
+        db_session, fake_redis, "locked_orm@example.com"
+    )
+    user.locked_until = datetime.now(tz=timezone.utc) + timedelta(hours=1)
+    await db_session.commit()
+
+    resp = await async_client.get(
+        _PROTECTED_URL,
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "Account is temporarily locked"
+
+
+@pytest.mark.asyncio
+async def test_deactivated_user_rejected_via_orm_fixture(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    fake_redis: object,
+) -> None:
+    """Deactivated-user rejection via ORM fixture — exercises get_current_user step 6.
+
+    Creates the user directly via ORM and seeds the Redis session manually.
+    Verifies the is_active=False branch returns 403 with the correct detail.
+    """
+    from tests.helpers import make_orm_user
+
+    user, access_token = await make_orm_user(
+        db_session, fake_redis, "deactivated_orm@example.com"
+    )
+    user.is_active = False
+    await db_session.commit()
+
+    resp = await async_client.get(
+        _PROTECTED_URL,
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "Account is deactivated"
