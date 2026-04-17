@@ -20,6 +20,7 @@ Security properties enforced:
 from __future__ import annotations
 
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 
 from fastapi import Depends, HTTPException
@@ -240,7 +241,7 @@ async def require_verified(
         )
 
 
-def require_role(*roles: UserRole):  # type: ignore[return]
+def require_role(*roles: UserRole) -> Callable[[User], Awaitable[None]]:
     """Factory that returns an async dependency enforcing RBAC role membership.
 
     This factory is the primary mechanism for enforcing SR-11 (Role-Based Access
