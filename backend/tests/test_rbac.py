@@ -394,3 +394,50 @@ async def test_admin_ping_unverified_admin_returns_403(
     )
 
     assert response.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Response body structure
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_admin_ping_response_body_structure(
+    async_client: AsyncClient,
+    fake_redis: fakeredis.FakeRedis,
+    db_session: AsyncSession,
+) -> None:
+    """GET /admin/ping response contains exactly {status, role} with no extras.
+
+    Verifies the contract: only ``status`` and ``role`` keys are present.
+    Unexpected extra fields could leak internal state to the admin caller.
+    """
+    admin = User(
+        email="admin_body_check@example.com",
+        hashed_password=hash_password("TestPassword123!"),
+        role=UserRole.ADMIN,
+        is_active=True,
+        is_verified=True,
+    )
+    db_session.add(admin)
+    await db_session.commit()
+    await db_session.refresh(admin)
+
+    token = create_access_token(
+        subject=str(admin.id),
+        role=admin.role.value,
+        session_id=_SECOND_SESSION_ID,
+        settings=_TEST_SETTINGS,
+    )
+    await fake_redis.set(f"session:{_SECOND_SESSION_ID}", str(admin.id))
+
+    response = await async_client.get(
+        "/api/v1/admin/ping",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body.keys()) == {"status", "role"}
+    assert body["status"] == "ok"
+    assert body["role"] == "admin"

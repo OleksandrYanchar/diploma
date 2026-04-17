@@ -1,0 +1,26 @@
+{
+  "method": "GET",
+  "path": "/api/v1/auth/verify-email",
+  "authentication": "none",
+  "scenarios": {
+    "success_valid_token": {
+      "description": "Single-use token from registration (demo: server stdout).",
+      "query": {
+        "token": "REPLACE_WITH_RAW_VERIFICATION_TOKEN"
+      },
+      "expectedStatus": 200
+    },
+    "failure_invalid_or_used_token_400": {
+      "description": "Wrong, expired, or replayed token → 400.",
+      "query": {
+        "token": "invalid-or-already-consumed-token"
+      },
+      "expectedStatus": 400
+    },
+    "failure_missing_token_422": {
+      "description": "Required query param missing → 422.",
+      "query": {},
+      "expectedStatus": 422
+    }
+  }
+}

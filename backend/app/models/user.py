@@ -72,7 +72,7 @@ class User(Base):
 
     # RBAC role.  Defaults to USER (least privilege).
     role: Mapped[UserRole] = mapped_column(
-        Enum(UserRole, name="userrole"),
+        Enum(UserRole, name="userrole", values_callable=lambda e: [m.value for m in e]),
         nullable=False,
         default=UserRole.USER,
     )

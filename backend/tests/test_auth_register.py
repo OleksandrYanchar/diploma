@@ -11,8 +11,14 @@ depends on state produced by another test.
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.audit_log import AuditLog
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -106,6 +112,89 @@ async def test_register_invalid_email_returns_422(async_client: AsyncClient) -> 
     assert response.status_code == 422
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "password",
+    [
+        "nouppercase1!aa",
+        "NOLOWERCASE1!AA",
+        "NoDigitHere!abc",
+        "NoSpecialChar1a",
+    ],
+    ids=["no-uppercase", "no-lowercase", "no-digit", "no-special"],
+)
+async def test_register_password_policy_violation_returns_422(
+    async_client: AsyncClient,
+    password: str,
+) -> None:
+    """Each SR-01 sub-rule is enforced: uppercase, lowercase, digit, special."""
+    resp = await async_client.post(
+        _REGISTER_URL,
+        json={"email": f"policy_{password[:8]}@example.com", "password": password},
+    )
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"password": "StrongPass1!"},
+        {"email": "missing_pw@example.com"},
+        {},
+    ],
+    ids=["missing-email", "missing-password", "empty-body"],
+)
+async def test_register_missing_fields_returns_422(
+    async_client: AsyncClient,
+    body: dict,
+) -> None:
+    """Missing required fields are caught by Pydantic and return 422."""
+    resp = await async_client.post(_REGISTER_URL, json=body)
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_register_creates_audit_log_entry(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    """Registration writes a REGISTER audit log entry (SR-16)."""
+    email = "register_audit@example.com"
+    resp = await async_client.post(
+        _REGISTER_URL,
+        json={"email": email, "password": _STRONG_PASSWORD},
+    )
+    assert resp.status_code == 201
+    user_id = resp.json()["id"]
+
+    result = await db_session.execute(
+        select(AuditLog).where(
+            AuditLog.action == "REGISTER",
+            AuditLog.user_id == uuid.UUID(user_id),
+        )
+    )
+    log_entry = result.scalar_one_or_none()
+    assert log_entry is not None, "Expected a REGISTER audit log entry"
+
+
+@pytest.mark.asyncio
+async def test_register_response_excludes_email_verification_token(
+    async_client: AsyncClient,
+) -> None:
+    """Registration response must not leak the email_verification_token_hash."""
+    resp = await async_client.post(
+        _REGISTER_URL,
+        json={"email": "no_leak@example.com", "password": _STRONG_PASSWORD},
+    )
+    assert resp.status_code == 201
+    body = resp.json()
+    assert "email_verification_token_hash" not in body
+    assert "hashed_password" not in body
+    assert "mfa_secret" not in body
+    assert "failed_login_count" not in body
+
+
 # ---------------------------------------------------------------------------
 # Email verification tests
 # ---------------------------------------------------------------------------
@@ -191,3 +280,34 @@ async def test_verify_email_already_used_returns_400(
     # Second verification with the same token: must fail.
     second = await async_client.get(_VERIFY_URL, params={"token": raw_token})
     assert second.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_verify_email_creates_audit_log_entry(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Email verification writes an EMAIL_VERIFIED audit log entry (SR-16)."""
+    email = "verify_audit@example.com"
+    reg = await async_client.post(
+        _REGISTER_URL,
+        json={"email": email, "password": _STRONG_PASSWORD},
+    )
+    assert reg.status_code == 201
+    user_id = reg.json()["id"]
+
+    captured = capsys.readouterr()
+    raw_token = captured.out.strip().rsplit(": ", maxsplit=1)[-1]
+
+    resp = await async_client.get(_VERIFY_URL, params={"token": raw_token})
+    assert resp.status_code == 200
+
+    result = await db_session.execute(
+        select(AuditLog).where(
+            AuditLog.action == "EMAIL_VERIFIED",
+            AuditLog.user_id == uuid.UUID(user_id),
+        )
+    )
+    log_entry = result.scalar_one_or_none()
+    assert log_entry is not None, "Expected an EMAIL_VERIFIED audit log entry"

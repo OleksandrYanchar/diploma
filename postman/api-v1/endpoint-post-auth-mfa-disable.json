@@ -1,0 +1,64 @@
+{
+  "method": "POST",
+  "path": "/api/v1/auth/mfa/disable",
+  "authentication": "Bearer + email verified",
+  "contentType": "application/json",
+  "headers": {
+    "Authorization": "Bearer {{access_token_verified_mfa}}"
+  },
+  "scenarios": {
+    "success_correct_password_and_totp": {
+      "body": {
+        "password": "CurrentPassword1!",
+        "totp_code": "123456"
+      },
+      "expectedStatus": 200
+    },
+    "failure_wrong_password_401": {
+      "body": {
+        "password": "WrongPassword1!",
+        "totp_code": "123456"
+      },
+      "expectedStatus": 401
+    },
+    "failure_wrong_totp_401": {
+      "body": {
+        "password": "CurrentPassword1!",
+        "totp_code": "000000"
+      },
+      "expectedStatus": 401
+    },
+    "failure_mfa_not_enabled_400": {
+      "description": "Account without MFA.",
+      "body": {
+        "password": "CurrentPassword1!",
+        "totp_code": "123456"
+      },
+      "expectedStatus": 400
+    },
+    "failure_unverified_403": {
+      "headers": {
+        "Authorization": "Bearer {{access_token_unverified}}"
+      },
+      "body": {
+        "password": "CurrentPassword1!",
+        "totp_code": "123456"
+      },
+      "expectedStatus": 403
+    },
+    "validation_empty_password_schema_422": {
+      "body": {
+        "password": "",
+        "totp_code": "123456"
+      },
+      "expectedStatus": 422
+    },
+    "validation_totp_too_short_schema_422": {
+      "body": {
+        "password": "x",
+        "totp_code": "123"
+      },
+      "expectedStatus": 422
+    }
+  }
+}

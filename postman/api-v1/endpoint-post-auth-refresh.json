@@ -1,0 +1,38 @@
+{
+  "method": "POST",
+  "path": "/api/v1/auth/refresh",
+  "authentication": "none",
+  "contentType": "application/json",
+  "scenarios": {
+    "success_valid_refresh_token": {
+      "description": "Valid, non-revoked refresh token from login/refresh → new pair.",
+      "body": {
+        "refresh_token": "{{refresh_token}}"
+      },
+      "expectedStatus": 200
+    },
+    "failure_invalid_or_expired_refresh_401": {
+      "body": {
+        "refresh_token": "opaque-token-not-in-database"
+      },
+      "expectedStatus": 401
+    },
+    "failure_reuse_revoked_token_401": {
+      "description": "SR-08: reuse after rotation/revocation → 401; session may be destroyed.",
+      "body": {
+        "refresh_token": "previously-used-refresh-token"
+      },
+      "expectedStatus": 401
+    },
+    "validation_empty_refresh_token_schema_422": {
+      "body": {
+        "refresh_token": ""
+      },
+      "expectedStatus": 422
+    },
+    "validation_missing_field_schema_422": {
+      "body": {},
+      "expectedStatus": 422
+    }
+  }
+}

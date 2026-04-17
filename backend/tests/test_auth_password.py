@@ -14,11 +14,7 @@ issue documented in conftest.py.  The verified_user fixture is not used to
 prevent email collisions across test modules.
 
 Integration test pattern:
-- Create a User via ORM with a known plaintext password.
-- Mint an access token with create_access_token (same _TEST_SETTINGS as
-  async_client).
-- Seed fake_redis with ``session:{_FIXTURE_SESSION_ID} = str(user.id)`` so that
-  get_current_user's Redis session check (step 4) passes.
+- Create a User via ``make_orm_user`` (ORM + Redis session seeding).
 - Call the endpoint via async_client.
 """
 
@@ -31,67 +27,16 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.security import create_access_token, hash_password, verify_password
+from app.core.security import verify_password
 from app.models.audit_log import AuditLog
-from app.models.user import User, UserRole
+from app.models.user import User
+from tests.helpers import make_orm_user
 
-# ---------------------------------------------------------------------------
-# Re-use the test-settings constants defined in conftest.py.
-# ---------------------------------------------------------------------------
-from tests.conftest import _FIXTURE_SESSION_ID, _TEST_SETTINGS
-
-# ---------------------------------------------------------------------------
-# URL constants
-# ---------------------------------------------------------------------------
 _PASSWORD_CHANGE_URL = "/api/v1/auth/password/change"
 _USERS_ME_URL = "/api/v1/users/me"
 
 _STRONG_PASSWORD = "StrongPass1!"
 _NEW_STRONG_PASSWORD = "N3wStr0ngP@ss!"
-
-
-# ---------------------------------------------------------------------------
-# Helper: create a verified user and a valid access token
-# ---------------------------------------------------------------------------
-
-
-async def _make_verified_user(
-    db_session: AsyncSession,
-    email: str,
-    password: str = _STRONG_PASSWORD,
-) -> tuple[User, str]:
-    """Create a verified USER-role account via ORM and return (user, access_token).
-
-    The access token is minted with _TEST_SETTINGS and bound to
-    _FIXTURE_SESSION_ID so that integration tests can seed fake_redis with a
-    single known key and satisfy get_current_user's session check.
-
-    Args:
-        db_session: Isolated test database session.
-        email:      Unique email for this test user.
-        password:   Plaintext password to hash and store.
-
-    Returns:
-        A 2-tuple ``(user, access_token)``.
-    """
-    user = User(
-        email=email,
-        hashed_password=hash_password(password),
-        role=UserRole.USER,
-        is_active=True,
-        is_verified=True,
-    )
-    db_session.add(user)
-    await db_session.commit()
-    await db_session.refresh(user)
-
-    token = create_access_token(
-        subject=str(user.id),
-        role=user.role.value,
-        session_id=_FIXTURE_SESSION_ID,
-        settings=_TEST_SETTINGS,
-    )
-    return user, token
 
 
 # ---------------------------------------------------------------------------
@@ -114,10 +59,9 @@ async def test_password_change_success(
     4. The new password verifies correctly against the stored hash (SR-02).
     """
     email = f"pw_change_ok_{uuid.uuid4().hex[:8]}@example.com"
-    user, access_token = await _make_verified_user(db_session, email)
-
-    # Seed the Redis session so get_current_user's session check passes.
-    await fake_redis.set(f"session:{_FIXTURE_SESSION_ID}", str(user.id))
+    user, access_token = await make_orm_user(
+        db_session, fake_redis, email, password=_STRONG_PASSWORD
+    )
 
     response = await async_client.post(
         _PASSWORD_CHANGE_URL,
@@ -171,9 +115,9 @@ async def test_password_change_wrong_current_password_returns_401(
     No audit log entry must be written on failure — audit on success path only.
     """
     email = f"pw_change_wrong_pw_{uuid.uuid4().hex[:8]}@example.com"
-    user, access_token = await _make_verified_user(db_session, email)
-
-    await fake_redis.set(f"session:{_FIXTURE_SESSION_ID}", str(user.id))
+    user, access_token = await make_orm_user(
+        db_session, fake_redis, email, password=_STRONG_PASSWORD
+    )
 
     response = await async_client.post(
         _PASSWORD_CHANGE_URL,
@@ -211,9 +155,9 @@ async def test_password_change_weak_new_password_returns_422(
     with HTTP 422.  No PASSWORD_CHANGED audit entry must be written.
     """
     email = f"pw_change_weak_{uuid.uuid4().hex[:8]}@example.com"
-    user, access_token = await _make_verified_user(db_session, email)
-
-    await fake_redis.set(f"session:{_FIXTURE_SESSION_ID}", str(user.id))
+    user, access_token = await make_orm_user(
+        db_session, fake_redis, email, password=_STRONG_PASSWORD
+    )
 
     # "password123" fails SR-01: no uppercase, no special character.
     response = await async_client.post(
@@ -275,11 +219,9 @@ async def test_password_change_does_not_revoke_existing_session(
     on password change is deferred to Phase 6 (password reset flow).
     """
     email = f"pw_change_no_revoke_{uuid.uuid4().hex[:8]}@example.com"
-    user, access_token = await _make_verified_user(db_session, email)
-
-    # Seed the session so get_current_user passes on both the change and the
-    # subsequent /users/me call.
-    await fake_redis.set(f"session:{_FIXTURE_SESSION_ID}", str(user.id))
+    user, access_token = await make_orm_user(
+        db_session, fake_redis, email, password=_STRONG_PASSWORD
+    )
 
     # Change the password.
     change_resp = await async_client.post(
@@ -301,3 +243,106 @@ async def test_password_change_does_not_revoke_existing_session(
     assert (
         me_resp.status_code == 200
     ), "Session must remain valid after password change (ADR-21 behaviour)"
+
+
+@pytest.mark.asyncio
+async def test_password_change_missing_new_password_returns_422(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    fake_redis,
+) -> None:
+    """POST /auth/password/change without new_password in body returns 422.
+
+    The ``PasswordChangeRequest`` schema requires both ``current_password`` and
+    ``new_password``. Omitting either must trigger Pydantic validation failure.
+    """
+    email = f"pw_missing_{uuid.uuid4().hex[:8]}@example.com"
+    user, access_token = await make_orm_user(
+        db_session, fake_redis, email, password=_STRONG_PASSWORD
+    )
+
+    resp = await async_client.post(
+        _PASSWORD_CHANGE_URL,
+        json={"current_password": _STRONG_PASSWORD},
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_password_change_unverified_user_allowed(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    fake_redis,
+) -> None:
+    """Unverified users can change their password (no require_verified).
+
+    Per the implementation, POST /auth/password/change depends only on
+    get_current_user, not require_verified. An unverified user with a valid
+    session must be able to change their password.
+    """
+    email = f"pw_unverified_{uuid.uuid4().hex[:8]}@example.com"
+    user, token = await make_orm_user(
+        db_session,
+        fake_redis,
+        email,
+        password=_STRONG_PASSWORD,
+        is_verified=False,
+    )
+
+    resp = await async_client.post(
+        _PASSWORD_CHANGE_URL,
+        json={
+            "current_password": _STRONG_PASSWORD,
+            "new_password": _NEW_STRONG_PASSWORD,
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Login with old password after password change
+# ---------------------------------------------------------------------------
+
+_LOGIN_URL = "/api/v1/auth/login"
+
+
+@pytest.mark.asyncio
+async def test_login_with_old_password_fails_after_change(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    fake_redis,
+) -> None:
+    """After a password change, the old password must be rejected (SR-02).
+
+    This is a high-value regression guard: if password hashing or storage
+    is broken, both old and new passwords might succeed.  We verify that
+    only the new password works and the old one returns 401.
+    """
+    email = f"pw_old_login_{uuid.uuid4().hex[:8]}@example.com"
+    user, access_token = await make_orm_user(
+        db_session, fake_redis, email, password=_STRONG_PASSWORD
+    )
+
+    change = await async_client.post(
+        _PASSWORD_CHANGE_URL,
+        json={
+            "current_password": _STRONG_PASSWORD,
+            "new_password": _NEW_STRONG_PASSWORD,
+        },
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    assert change.status_code == 200
+
+    old_pw_login = await async_client.post(
+        _LOGIN_URL,
+        json={"email": email, "password": _STRONG_PASSWORD},
+    )
+    assert old_pw_login.status_code == 401
+
+    new_pw_login = await async_client.post(
+        _LOGIN_URL,
+        json={"email": email, "password": _NEW_STRONG_PASSWORD},
+    )
+    assert new_pw_login.status_code == 200

@@ -1,0 +1,40 @@
+{
+  "method": "GET",
+  "path": "/api/v1/admin/ping",
+  "authentication": "Bearer + verified email + ADMIN role",
+  "headers": {
+    "Authorization": "Bearer {{access_token_admin_verified}}"
+  },
+  "scenarios": {
+    "success_admin_verified": {
+      "headers": {
+        "Authorization": "Bearer {{access_token_admin_verified}}"
+      },
+      "expectedStatus": 200
+    },
+    "failure_forbidden_not_admin_403": {
+      "description": "Authenticated verified CUSTOMER (or other non-ADMIN role).",
+      "headers": {
+        "Authorization": "Bearer {{access_token_customer_verified}}"
+      },
+      "expectedStatus": 403
+    },
+    "failure_unverified_admin_403": {
+      "description": "ADMIN but email not verified.",
+      "headers": {
+        "Authorization": "Bearer {{access_token_admin_unverified}}"
+      },
+      "expectedStatus": 403
+    },
+    "failure_missing_authorization_403": {
+      "headers": {},
+      "expectedStatus": 403
+    },
+    "failure_invalid_token_401": {
+      "headers": {
+        "Authorization": "Bearer invalid.jwt.here"
+      },
+      "expectedStatus": 401
+    }
+  }
+}

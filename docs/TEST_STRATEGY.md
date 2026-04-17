@@ -283,6 +283,40 @@ These tests **must pass** before the thesis can be defended. They directly verif
 
 ---
 
+## 5a. T-ID → Test Function Mapping (Phases 1–4)
+
+The table below maps each MVP-critical test identifier to the concrete pytest
+function that implements it, or notes that the test is deferred to a later
+phase.  Only T-IDs whose implementing phase is complete are mapped; the rest
+are listed as "Phase N — not yet implemented".
+
+| T-ID | Test Function | File | Status |
+|------|--------------|------|--------|
+| T-01 | `test_login_wrong_password_returns_401` | `test_auth_login.py` | Implemented |
+| T-02 | `test_login_account_lockout_after_max_failures` | `test_auth_login.py` | Implemented |
+| T-03 | `test_mfa_login_no_totp_code_returns_mfa_required` | `test_auth_mfa.py` | Implemented |
+| T-04 | `test_mfa_login_invalid_totp_code_returns_401_and_writes_mfa_failed_audit` | `test_auth_mfa.py` | Implemented |
+| T-05 | `test_refresh_old_token_rejected_after_rotation` | `test_auth_refresh.py` | Implemented |
+| T-06 | `test_refresh_reuse_detection_revokes_session` | `test_auth_refresh.py` | Implemented |
+| T-07 | `test_logout_blacklists_access_token` | `test_auth_logout.py` | Implemented |
+| T-08 | `test_protected_endpoint_rejects_missing_redis_session` | `test_get_current_user.py` | Implemented |
+| T-09 | `test_admin_ping_user_role_returns_403` | `test_rbac.py` | Implemented |
+| T-10 | `test_admin_ping_unauthenticated_returns_403` | `test_rbac.py` | Implemented |
+| T-11 | — | — | Phase 5 — not yet implemented |
+| T-12 | — | — | Phase 5 — not yet implemented |
+| T-13 | — | — | Phase 5 — not yet implemented |
+| T-14 | — | — | Phase 5 — not yet implemented |
+| T-15 | — | — | Phase 7 — not yet implemented |
+| T-16 | `test_login_audit_log_written_on_success` | `test_auth_login.py` | Implemented |
+| T-17 | — | — | Phase 6 — not yet implemented |
+| T-18 | — | — | Phase 6 — not yet implemented |
+| T-19 | `test_register_weak_password_returns_422` | `test_auth_register.py` | Implemented |
+| T-20 | — | — | Phase 6 — not yet implemented |
+
+**12 of 20** MVP-critical tests are implemented as of the end of Phase 4.
+
+---
+
 ## 6. Post-MVP / Optional Tests
 
 These tests verify features that are deferred to post-MVP or that go beyond the minimum thesis requirements.

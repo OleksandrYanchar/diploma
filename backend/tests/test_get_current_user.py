@@ -23,11 +23,14 @@ import jwt as pyjwt
 import pytest
 from fastapi import Depends
 from httpx import AsyncClient
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.dependencies.auth import get_current_user
 from app.main import app
 from app.models.user import User
+from tests.helpers import register_verify_login
 
 # ---------------------------------------------------------------------------
 # Test-only protected route
@@ -45,62 +48,6 @@ async def _test_protected(
 ) -> dict[str, str]:
     """Test-only route: return the authenticated user's ID."""
     return {"user_id": str(current_user.id)}
-
-
-# ---------------------------------------------------------------------------
-# URL constants for setup helpers
-# ---------------------------------------------------------------------------
-_REGISTER_URL = "/api/v1/auth/register"
-_VERIFY_URL = "/api/v1/auth/verify-email"
-_LOGIN_URL = "/api/v1/auth/login"
-_STRONG_PASSWORD = "StrongPass1!"
-
-
-# ---------------------------------------------------------------------------
-# Helper: register, verify, and login — returns the access_token string
-# ---------------------------------------------------------------------------
-
-
-async def _register_verify_login(
-    async_client: AsyncClient,
-    capsys: pytest.CaptureFixture[str],
-    email: str,
-) -> str:
-    """Register a user, verify their email, and log them in.
-
-    Returns the access_token string from the login response.
-
-    Args:
-        async_client: Test HTTP client fixture.
-        capsys:       pytest stdout capture fixture.
-        email:        Email address to register.
-
-    Returns:
-        The raw access_token JWT string.
-    """
-    # Register
-    reg_resp = await async_client.post(
-        _REGISTER_URL,
-        json={"email": email, "password": _STRONG_PASSWORD},
-    )
-    assert reg_resp.status_code == 201
-
-    # Capture the verification token printed to stdout (DEMO MODE)
-    captured = capsys.readouterr()
-    raw_token = captured.out.strip().rsplit(": ", maxsplit=1)[-1]
-
-    # Verify email
-    verify_resp = await async_client.get(_VERIFY_URL, params={"token": raw_token})
-    assert verify_resp.status_code == 200
-
-    # Login
-    login_resp = await async_client.post(
-        _LOGIN_URL,
-        json={"email": email, "password": _STRONG_PASSWORD},
-    )
-    assert login_resp.status_code == 200
-
-    return login_resp.json()["access_token"]
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +133,7 @@ async def test_protected_endpoint_accepts_valid_token(
     Enforces SR-06, SR-09, SR-10 (nothing blocking the request).
     """
     email = "dep_valid@example.com"
-    access_token = await _register_verify_login(async_client, capsys, email)
+    _, access_token, _ = await register_verify_login(async_client, capsys, email)
 
     response = await async_client.get(
         _PROTECTED_URL,
@@ -213,7 +160,7 @@ async def test_protected_endpoint_rejects_missing_redis_session(
     get_current_user to reject the request at Step 4.  Enforces SR-10.
     """
     email = "dep_no_session@example.com"
-    access_token = await _register_verify_login(async_client, capsys, email)
+    _, access_token, _ = await register_verify_login(async_client, capsys, email)
 
     # Decode the JWT without verifying expiry to extract the session_id claim.
     settings = Settings()  # type: ignore[call-arg]
@@ -249,7 +196,7 @@ async def test_protected_endpoint_rejects_blacklisted_token(
     JWT signature and session are both still valid.  Enforces SR-09.
     """
     email = "dep_blacklisted@example.com"
-    access_token = await _register_verify_login(async_client, capsys, email)
+    _, access_token, _ = await register_verify_login(async_client, capsys, email)
 
     # Decode the JWT without verifying expiry to extract the jti claim.
     settings = Settings()  # type: ignore[call-arg]
@@ -269,3 +216,128 @@ async def test_protected_endpoint_rejects_blacklisted_token(
         headers={"Authorization": f"Bearer {access_token}"},
     )
     assert response.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Deactivated / locked user rejection (Steps 6–7 of get_current_user)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_protected_endpoint_rejects_deactivated_user(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A deactivated user's valid token is rejected with 403 by get_current_user.
+
+    Even if the JWT is cryptographically valid and the Redis session exists,
+    a user with is_active=False must be rejected at step 6 (SR-05).
+    """
+    email = "dep_deactivated@example.com"
+    _, access_token, _ = await register_verify_login(async_client, capsys, email)
+
+    result = await db_session.execute(select(User).where(User.email == email))
+    user = result.scalar_one()
+    user.is_active = False
+    await db_session.commit()
+
+    resp = await async_client.get(
+        _PROTECTED_URL,
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "Account is deactivated"
+
+
+@pytest.mark.asyncio
+async def test_protected_endpoint_rejects_locked_user(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A locked user's valid token is rejected with 403 by get_current_user.
+
+    Even if the JWT and Redis session are valid, a user whose locked_until
+    is in the future must be rejected at step 7 (SR-05).
+    """
+    email = "dep_locked@example.com"
+    _, access_token, _ = await register_verify_login(async_client, capsys, email)
+
+    result = await db_session.execute(select(User).where(User.email == email))
+    user = result.scalar_one()
+    user.locked_until = datetime.now(tz=timezone.utc) + timedelta(hours=1)
+    await db_session.commit()
+
+    resp = await async_client.get(
+        _PROTECTED_URL,
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "Account is temporarily locked"
+
+
+# ---------------------------------------------------------------------------
+# ORM-fixture variants for direct coverage of steps 5–7
+#
+# The register-verify-login tests above prove the behaviour but use a complex
+# async context (multiple ASGI round-trips within the same session).
+# Coverage.py sometimes loses trace context across ASGI transport boundaries.
+# These ORM-based tests exercise the same branches with a simpler setup
+# (direct ORM insert + manual Redis seed) so that coverage can track them.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_locked_user_rejected_via_orm_fixture(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    fake_redis: object,
+) -> None:
+    """Locked-user rejection via ORM fixture — exercises get_current_user step 6.
+
+    Creates the user directly via ORM and seeds the Redis session manually,
+    avoiding the multi-step register-verify-login API flow.  This ensures
+    the locked_until branch in get_current_user is visible to coverage.py.
+    """
+    from tests.helpers import make_orm_user
+
+    user, access_token = await make_orm_user(
+        db_session, fake_redis, "locked_orm@example.com"
+    )
+    user.locked_until = datetime.now(tz=timezone.utc) + timedelta(hours=1)
+    await db_session.commit()
+
+    resp = await async_client.get(
+        _PROTECTED_URL,
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "Account is temporarily locked"
+
+
+@pytest.mark.asyncio
+async def test_deactivated_user_rejected_via_orm_fixture(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    fake_redis: object,
+) -> None:
+    """Deactivated-user rejection via ORM fixture — exercises get_current_user step 6.
+
+    Creates the user directly via ORM and seeds the Redis session manually.
+    Verifies the is_active=False branch returns 403 with the correct detail.
+    """
+    from tests.helpers import make_orm_user
+
+    user, access_token = await make_orm_user(
+        db_session, fake_redis, "deactivated_orm@example.com"
+    )
+    user.is_active = False
+    await db_session.commit()
+
+    resp = await async_client.get(
+        _PROTECTED_URL,
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "Account is deactivated"

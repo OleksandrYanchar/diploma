@@ -15,12 +15,15 @@ depends on state produced by another test.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timedelta, timezone
 
+import jwt as pyjwt
 import pytest
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import Settings
 from app.models.audit_log import AuditLog
 from app.models.user import User
 
@@ -458,3 +461,190 @@ async def test_login_mfa_gate_writes_audit_log(
 
     assert log_entry is not None, "Expected a LOGIN_MFA_REQUIRED audit log entry"
     assert log_entry.user_id == uuid.UUID(user_id)
+
+
+# ---------------------------------------------------------------------------
+# Deactivated / locked / session / validation edge cases
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_login_deactivated_user_returns_403(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Login with a deactivated account returns 403 (SR-05)."""
+    email = "login_deactivated@example.com"
+    await _register_and_verify(async_client, capsys, email)
+
+    result = await db_session.execute(select(User).where(User.email == email))
+    user = result.scalar_one()
+    user.is_active = False
+    await db_session.commit()
+
+    resp = await async_client.post(
+        _LOGIN_URL,
+        json={"email": email, "password": _STRONG_PASSWORD},
+    )
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_login_prelocked_user_returns_403(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Login with a pre-locked account returns 403 (SR-05)."""
+    email = "login_prelocked@example.com"
+    await _register_and_verify(async_client, capsys, email)
+
+    result = await db_session.execute(select(User).where(User.email == email))
+    user = result.scalar_one()
+    user.locked_until = datetime.now(tz=timezone.utc) + timedelta(hours=1)
+    await db_session.commit()
+
+    resp = await async_client.post(
+        _LOGIN_URL,
+        json={"email": email, "password": _STRONG_PASSWORD},
+    )
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_login_creates_redis_session(
+    async_client: AsyncClient,
+    capsys: pytest.CaptureFixture[str],
+    fake_redis: object,
+) -> None:
+    """Successful login creates a Redis session key (SR-10)."""
+    email = "login_redis@example.com"
+    await _register_and_verify(async_client, capsys, email)
+
+    resp = await async_client.post(
+        _LOGIN_URL,
+        json={"email": email, "password": _STRONG_PASSWORD},
+    )
+    assert resp.status_code == 200
+
+    settings = Settings()  # type: ignore[call-arg]
+    decoded = pyjwt.decode(
+        resp.json()["access_token"],
+        settings.jwt_secret_key,
+        algorithms=[settings.jwt_algorithm],
+        options={"verify_exp": False},
+    )
+    session_id = decoded["session_id"]
+
+    session_val = await fake_redis.get(f"session:{session_id}")  # type: ignore[union-attr]
+    assert session_val is not None, "Redis session must exist after login"
+
+
+@pytest.mark.asyncio
+async def test_login_resets_failed_count_on_success(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Successful login resets the failed_login_count to 0 (SR-05)."""
+    email = "login_reset_count@example.com"
+    await _register_and_verify(async_client, capsys, email)
+
+    for _ in range(3):
+        await async_client.post(
+            _LOGIN_URL,
+            json={"email": email, "password": "WrongPassword9!"},
+        )
+
+    resp = await async_client.post(
+        _LOGIN_URL,
+        json={"email": email, "password": _STRONG_PASSWORD},
+    )
+    assert resp.status_code == 200
+
+    result = await db_session.execute(select(User).where(User.email == email))
+    user = result.scalar_one()
+    assert user.failed_login_count == 0, "Counter must reset after successful login"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"password": "StrongPass1!"},
+        {"email": "miss_pw@example.com"},
+        {},
+    ],
+    ids=["missing-email", "missing-password", "empty-body"],
+)
+async def test_login_missing_fields_returns_422(
+    async_client: AsyncClient,
+    body: dict,
+) -> None:
+    """Missing required fields in login request return 422."""
+    resp = await async_client.post(_LOGIN_URL, json=body)
+    assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Concurrent sessions
+# ---------------------------------------------------------------------------
+
+_USERS_ME_URL = "/api/v1/users/me"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_logins_produce_independent_sessions(
+    async_client: AsyncClient,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Two successive logins yield two independent sessions (SR-10).
+
+    Each login creates its own Redis session and access token.  Both tokens
+    must work because the service does NOT revoke prior sessions on login.
+    After logging out with one token, the other must still be valid.
+    """
+    email = f"concurrent_{uuid.uuid4().hex[:8]}@example.com"
+    await _register_and_verify(async_client, capsys, email)
+
+    login_1 = await async_client.post(
+        _LOGIN_URL,
+        json={"email": email, "password": _STRONG_PASSWORD},
+    )
+    assert login_1.status_code == 200
+    token_1 = login_1.json()["access_token"]
+    refresh_1 = login_1.json()["refresh_token"]
+
+    login_2 = await async_client.post(
+        _LOGIN_URL,
+        json={"email": email, "password": _STRONG_PASSWORD},
+    )
+    assert login_2.status_code == 200
+    token_2 = login_2.json()["access_token"]
+
+    assert token_1 != token_2
+
+    me_1 = await async_client.get(
+        _USERS_ME_URL,
+        headers={"Authorization": f"Bearer {token_1}"},
+    )
+    me_2 = await async_client.get(
+        _USERS_ME_URL,
+        headers={"Authorization": f"Bearer {token_2}"},
+    )
+    assert me_1.status_code == 200
+    assert me_2.status_code == 200
+
+    logout = await async_client.post(
+        "/api/v1/auth/logout",
+        json={"refresh_token": refresh_1},
+        headers={"Authorization": f"Bearer {token_1}"},
+    )
+    assert logout.status_code == 200
+
+    me_after = await async_client.get(
+        _USERS_ME_URL,
+        headers={"Authorization": f"Bearer {token_2}"},
+    )
+    assert me_after.status_code == 200
