@@ -1,20 +1,23 @@
 """Authentication router — registration, verification, login, refresh, logout, and MFA.
 
 Exposes:
-- POST /auth/register     -- create a new user account (SR-01, SR-02, SR-03)
-- GET  /auth/verify-email -- consume the email verification token (SR-03)
-- POST /auth/login        -- authenticate and receive JWT + refresh token
-                             (SR-02, SR-05, SR-06, SR-07, SR-10, SR-16)
-- POST /auth/refresh      -- rotate refresh token and issue new access token
-                             (SR-07, SR-08, SR-10, SR-16)
-- POST /auth/logout       -- terminate session, revoke tokens
-                             (SR-09, SR-10, SR-16)
-- POST /auth/mfa/setup    -- initiate TOTP enrollment, return secret + QR code
-                             (SR-04, SR-16)
-- POST /auth/mfa/enable   -- confirm TOTP code and activate the MFA gate
-                             (SR-04, SR-16)
-- POST /auth/mfa/disable  -- deactivate the MFA gate after verifying password + TOTP
-                             (SR-04, SR-16)
+- POST /auth/register          -- create a new user account (SR-01, SR-02, SR-03)
+- GET  /auth/verify-email      -- consume the email verification token (SR-03)
+- POST /auth/login             -- authenticate and receive JWT + refresh token
+                                  (SR-02, SR-05, SR-06, SR-07, SR-10, SR-16)
+- POST /auth/refresh           -- rotate refresh token and issue new access token
+                                  (SR-07, SR-08, SR-10, SR-16)
+- POST /auth/logout            -- terminate session, revoke tokens
+                                  (SR-09, SR-10, SR-16)
+- POST /auth/mfa/setup         -- initiate TOTP enrollment, return secret + QR code
+                                  (SR-04, SR-16)
+- POST /auth/mfa/enable        -- confirm TOTP code and activate the MFA gate
+                                  (SR-04, SR-16)
+- POST /auth/mfa/disable       -- deactivate the MFA gate after verifying password +
+                                  TOTP
+                                  (SR-04, SR-16)
+- POST /auth/password/change   -- change the authenticated user's password
+                                  (SR-01, SR-02, SR-16; ADR-21)
 
 Route handlers are intentionally thin: they extract HTTP inputs, delegate all
 business logic to ``auth.service``, and format the response.  No security
@@ -22,9 +25,9 @@ decisions are made here.
 
 Security note: /register, /verify-email, /login, and /refresh are unauthenticated
 by design -- /refresh accepts an expired access token intentionally, so it cannot
-require a valid Bearer credential.  /logout, /mfa/setup, /mfa/enable, and
-/mfa/disable require a valid Bearer token via ``get_current_user``.  Rate limiting
-is enforced at the Nginx layer (SR-15).
+require a valid Bearer credential.  /logout, /mfa/setup, /mfa/enable, /mfa/disable,
+and /password/change require a valid Bearer token via ``get_current_user``.  Rate
+limiting is enforced at the Nginx layer (SR-15).
 """
 
 from __future__ import annotations
@@ -36,6 +39,7 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.service import (
+    change_password,
     disable_mfa,
     enable_mfa,
     register_user,
@@ -58,6 +62,7 @@ from app.schemas.auth import (
     MFAEnableRequest,
     MFARequiredResponse,
     MFASetupResponse,
+    PasswordChangeRequest,
     RefreshRequest,
     TokenResponse,
 )
@@ -472,3 +477,45 @@ async def mfa_disable(
         db=db,
     )
     return {"detail": "MFA disabled successfully"}
+
+
+@router.post(
+    "/password/change",
+    status_code=status.HTTP_200_OK,
+    summary="Change the authenticated user's password",
+)
+async def password_change(
+    body: PasswordChangeRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, str]:
+    """Change the authenticated user's password.
+
+    Verifies the current password, enforces the SR-01 strength policy on the
+    new password, and writes a PASSWORD_CHANGED audit log entry on success
+    (SR-16).  Existing sessions are NOT revoked — see ADR-21 for rationale.
+
+    Requires authentication (AUTHENTICATED access level per API_SCOPE.md).
+    Email verification is not required for this endpoint.
+
+    Args:
+        body:         Validated ``PasswordChangeRequest`` (current_password +
+                      new_password).
+        current_user: Authenticated User provided by ``get_current_user``.
+        db:           Injected async database session.
+
+    Returns:
+        A success message dict with HTTP 200.
+
+    Raises:
+        HTTPException 401: Current password is incorrect.
+        HTTPException 422: New password fails the SR-01 strength policy.
+        HTTPException 403: Authorization header absent (HTTPBearer behaviour).
+    """
+    await change_password(
+        user=current_user,
+        current_password=body.current_password,
+        new_password=body.new_password,
+        db=db,
+    )
+    return {"detail": "Password changed successfully"}
