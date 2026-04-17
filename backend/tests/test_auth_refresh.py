@@ -19,37 +19,21 @@ from datetime import datetime, timezone
 
 import jwt as pyjwt
 import pytest
+from fastapi import Depends
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.core.security import hash_token
+from app.dependencies.auth import get_current_user
+from app.main import app
 from app.models.audit_log import AuditLog
 from app.models.refresh_token import RefreshToken
+from app.models.user import User
+from tests.helpers import register_verify_login
 
-# ---------------------------------------------------------------------------
-# URL constants
-# ---------------------------------------------------------------------------
-_REGISTER_URL = "/api/v1/auth/register"
-_VERIFY_URL = "/api/v1/auth/verify-email"
-_LOGIN_URL = "/api/v1/auth/login"
 _REFRESH_URL = "/api/v1/auth/refresh"
-
-_STRONG_PASSWORD = "StrongPass1!"
-
-# ---------------------------------------------------------------------------
-# Test-only protected route for post-refresh token rejection test
-#
-# Registered once at module import time.  Uses a distinct path to avoid
-# colliding with the route defined in test_auth_logout.py.
-# ---------------------------------------------------------------------------
-from fastapi import Depends  # noqa: E402
-
-from app.dependencies.auth import get_current_user  # noqa: E402
-from app.main import app  # noqa: E402
-from app.models.user import User  # noqa: E402
-
 _PROTECTED_REFRESH_URL = "/test-protected-refresh"
 
 
@@ -59,49 +43,6 @@ async def _test_protected_refresh(
 ) -> dict[str, str]:
     """Test-only route: return the authenticated user's ID."""
     return {"user_id": str(current_user.id)}
-
-
-# ---------------------------------------------------------------------------
-# Helper: register, verify email, and login
-# ---------------------------------------------------------------------------
-
-
-async def _register_verify_login(
-    async_client: AsyncClient,
-    capsys: pytest.CaptureFixture[str],
-    email: str,
-) -> tuple[str, str]:
-    """Register a user, verify their email, and log them in.
-
-    Returns ``(access_token, refresh_token)`` from the login response.
-
-    Args:
-        async_client: Test HTTP client fixture.
-        capsys:       pytest stdout capture fixture (captures DEMO MODE token).
-        email:        Email address to register.
-
-    Returns:
-        A 2-tuple ``(access_token, refresh_token)``.
-    """
-    reg_resp = await async_client.post(
-        _REGISTER_URL,
-        json={"email": email, "password": _STRONG_PASSWORD},
-    )
-    assert reg_resp.status_code == 201
-
-    captured = capsys.readouterr()
-    raw_token = captured.out.strip().rsplit(": ", maxsplit=1)[-1]
-
-    verify_resp = await async_client.get(_VERIFY_URL, params={"token": raw_token})
-    assert verify_resp.status_code == 200
-
-    login_resp = await async_client.post(
-        _LOGIN_URL,
-        json={"email": email, "password": _STRONG_PASSWORD},
-    )
-    assert login_resp.status_code == 200
-    data = login_resp.json()
-    return data["access_token"], data["refresh_token"]
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +62,7 @@ async def test_refresh_returns_new_tokens(
     new opaque value (SR-07).
     """
     email = "refresh_new_tokens@example.com"
-    orig_access, orig_refresh = await _register_verify_login(
+    _, orig_access, orig_refresh = await register_verify_login(
         async_client, capsys, email
     )
 
@@ -166,7 +107,7 @@ async def test_refresh_old_token_rejected_after_rotation(
     return 401 on any subsequent attempt.  This enforces single-use semantics.
     """
     email = "refresh_old_rejected@example.com"
-    _, orig_refresh = await _register_verify_login(async_client, capsys, email)
+    _, _access, orig_refresh = await register_verify_login(async_client, capsys, email)
 
     # First rotation succeeds.
     first_resp = await async_client.post(
@@ -207,7 +148,7 @@ async def test_refresh_reuse_detection_revokes_session(
     current session.
     """
     email = "refresh_reuse_session@example.com"
-    access_token_1, refresh_token_1 = await _register_verify_login(
+    _, access_token_1, refresh_token_1 = await register_verify_login(
         async_client, capsys, email
     )
 
@@ -281,7 +222,7 @@ async def test_refresh_with_expired_token(
     issuing new tokens.
     """
     email = "refresh_expired@example.com"
-    _, refresh_token = await _register_verify_login(async_client, capsys, email)
+    _, _access, refresh_token = await register_verify_login(async_client, capsys, email)
 
     # Look up the token row and set expires_at to a past timestamp.
     token_hash = hash_token(refresh_token)
@@ -314,26 +255,9 @@ async def test_refresh_audit_log_written(
     confirm that the event was recorded for the specific user.
     """
     email = "refresh_audit@example.com"
-
-    # Register separately to capture user_id from the response.
-    reg_resp = await async_client.post(
-        _REGISTER_URL,
-        json={"email": email, "password": _STRONG_PASSWORD},
+    user_id, _access, refresh_token = await register_verify_login(
+        async_client, capsys, email
     )
-    assert reg_resp.status_code == 201
-    user_id = reg_resp.json()["id"]
-
-    captured = capsys.readouterr()
-    raw_token = captured.out.strip().rsplit(": ", maxsplit=1)[-1]
-    verify_resp = await async_client.get(_VERIFY_URL, params={"token": raw_token})
-    assert verify_resp.status_code == 200
-
-    login_resp = await async_client.post(
-        _LOGIN_URL,
-        json={"email": email, "password": _STRONG_PASSWORD},
-    )
-    assert login_resp.status_code == 200
-    refresh_token = login_resp.json()["refresh_token"]
 
     refresh_resp = await async_client.post(
         _REFRESH_URL,

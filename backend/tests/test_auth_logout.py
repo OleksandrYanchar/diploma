@@ -31,6 +31,13 @@ from app.main import app
 from app.models.audit_log import AuditLog
 from app.models.refresh_token import RefreshToken
 from app.models.user import User
+from tests.helpers import (
+    LOGIN_URL,
+    REGISTER_URL,
+    STRONG_PASSWORD,
+    VERIFY_URL,
+    register_verify_login,
+)
 
 # ---------------------------------------------------------------------------
 # Test-only protected route for post-logout token rejection test
@@ -52,60 +59,7 @@ async def _test_protected_logout(
 # ---------------------------------------------------------------------------
 # URL constants
 # ---------------------------------------------------------------------------
-_REGISTER_URL = "/api/v1/auth/register"
-_VERIFY_URL = "/api/v1/auth/verify-email"
-_LOGIN_URL = "/api/v1/auth/login"
 _LOGOUT_URL = "/api/v1/auth/logout"
-
-_STRONG_PASSWORD = "StrongPass1!"
-
-
-# ---------------------------------------------------------------------------
-# Helper: register, verify email, and login — returns (access_token, refresh_token)
-# ---------------------------------------------------------------------------
-
-
-async def _register_verify_login(
-    async_client: AsyncClient,
-    capsys: pytest.CaptureFixture[str],
-    email: str,
-) -> tuple[str, str]:
-    """Register a user, verify their email, and log them in.
-
-    Returns both the access_token and refresh_token from the login response so
-    that logout tests can supply both the Authorization header and the request body.
-
-    Args:
-        async_client: Test HTTP client fixture.
-        capsys:       pytest stdout capture fixture (captures DEMO MODE token).
-        email:        Email address to register.
-
-    Returns:
-        A 2-tuple ``(access_token, refresh_token)``.
-    """
-    # Register
-    reg_resp = await async_client.post(
-        _REGISTER_URL,
-        json={"email": email, "password": _STRONG_PASSWORD},
-    )
-    assert reg_resp.status_code == 201
-
-    # Capture the raw verification token printed to stdout (DEMO MODE)
-    captured = capsys.readouterr()
-    raw_token = captured.out.strip().rsplit(": ", maxsplit=1)[-1]
-
-    # Verify email
-    verify_resp = await async_client.get(_VERIFY_URL, params={"token": raw_token})
-    assert verify_resp.status_code == 200
-
-    # Login
-    login_resp = await async_client.post(
-        _LOGIN_URL,
-        json={"email": email, "password": _STRONG_PASSWORD},
-    )
-    assert login_resp.status_code == 200
-    data = login_resp.json()
-    return data["access_token"], data["refresh_token"]
 
 
 # ---------------------------------------------------------------------------
@@ -124,7 +78,7 @@ async def test_logout_returns_200(
     and returns the expected response shape (SR-09, SR-10).
     """
     email = "logout_200@example.com"
-    access_token, refresh_token = await _register_verify_login(
+    _, access_token, refresh_token = await register_verify_login(
         async_client, capsys, email
     )
 
@@ -151,7 +105,7 @@ async def test_logout_blacklists_access_token(
     blacklist and that ``get_current_user`` (Step 3) rejects it with 401.
     """
     email = "logout_blacklist@example.com"
-    access_token, refresh_token = await _register_verify_login(
+    _, access_token, refresh_token = await register_verify_login(
         async_client, capsys, email
     )
 
@@ -183,7 +137,7 @@ async def test_logout_revokes_refresh_token(
     preserved (SR-07, SR-16).
     """
     email = "logout_revoke_rt@example.com"
-    access_token, refresh_token = await _register_verify_login(
+    _, access_token, refresh_token = await register_verify_login(
         async_client, capsys, email
     )
 
@@ -217,7 +171,7 @@ async def test_logout_deletes_redis_session(
     that ``session:{session_id}`` no longer exists in FakeRedis.
     """
     email = "logout_redis@example.com"
-    access_token, refresh_token = await _register_verify_login(
+    _, access_token, refresh_token = await register_verify_login(
         async_client, capsys, email
     )
 
@@ -258,22 +212,20 @@ async def test_logout_audit_log_written(
 
     # Register separately to capture user_id from the response.
     reg_resp = await async_client.post(
-        _REGISTER_URL,
-        json={"email": email, "password": _STRONG_PASSWORD},
+        REGISTER_URL,
+        json={"email": email, "password": STRONG_PASSWORD},
     )
     assert reg_resp.status_code == 201
     user_id = reg_resp.json()["id"]
 
-    # Complete email verification.
     captured = capsys.readouterr()
     raw_token = captured.out.strip().rsplit(": ", maxsplit=1)[-1]
-    verify_resp = await async_client.get(_VERIFY_URL, params={"token": raw_token})
+    verify_resp = await async_client.get(VERIFY_URL, params={"token": raw_token})
     assert verify_resp.status_code == 200
 
-    # Login.
     login_resp = await async_client.post(
-        _LOGIN_URL,
-        json={"email": email, "password": _STRONG_PASSWORD},
+        LOGIN_URL,
+        json={"email": email, "password": STRONG_PASSWORD},
     )
     assert login_resp.status_code == 200
     login_data = login_resp.json()
@@ -331,7 +283,7 @@ async def test_logout_missing_refresh_token_returns_422(
     runs.
     """
     email = "logout_missing_rt@example.com"
-    access_token, _ = await _register_verify_login(async_client, capsys, email)
+    _, access_token, _rt = await register_verify_login(async_client, capsys, email)
 
     resp = await async_client.post(
         _LOGOUT_URL,
@@ -352,7 +304,7 @@ async def test_logout_blacklisted_token_rejected_on_subsequent_request(
     including a second logout attempt.
     """
     email = "logout_double@example.com"
-    access_token, refresh_token = await _register_verify_login(
+    _, access_token, refresh_token = await register_verify_login(
         async_client, capsys, email
     )
 

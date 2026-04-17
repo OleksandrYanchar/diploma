@@ -585,3 +585,66 @@ async def test_login_missing_fields_returns_422(
     """Missing required fields in login request return 422."""
     resp = await async_client.post(_LOGIN_URL, json=body)
     assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Concurrent sessions
+# ---------------------------------------------------------------------------
+
+_USERS_ME_URL = "/api/v1/users/me"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_logins_produce_independent_sessions(
+    async_client: AsyncClient,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Two successive logins yield two independent sessions (SR-10).
+
+    Each login creates its own Redis session and access token.  Both tokens
+    must work because the service does NOT revoke prior sessions on login.
+    After logging out with one token, the other must still be valid.
+    """
+    email = f"concurrent_{uuid.uuid4().hex[:8]}@example.com"
+    await _register_and_verify(async_client, capsys, email)
+
+    login_1 = await async_client.post(
+        _LOGIN_URL,
+        json={"email": email, "password": _STRONG_PASSWORD},
+    )
+    assert login_1.status_code == 200
+    token_1 = login_1.json()["access_token"]
+    refresh_1 = login_1.json()["refresh_token"]
+
+    login_2 = await async_client.post(
+        _LOGIN_URL,
+        json={"email": email, "password": _STRONG_PASSWORD},
+    )
+    assert login_2.status_code == 200
+    token_2 = login_2.json()["access_token"]
+
+    assert token_1 != token_2
+
+    me_1 = await async_client.get(
+        _USERS_ME_URL,
+        headers={"Authorization": f"Bearer {token_1}"},
+    )
+    me_2 = await async_client.get(
+        _USERS_ME_URL,
+        headers={"Authorization": f"Bearer {token_2}"},
+    )
+    assert me_1.status_code == 200
+    assert me_2.status_code == 200
+
+    logout = await async_client.post(
+        "/api/v1/auth/logout",
+        json={"refresh_token": refresh_1},
+        headers={"Authorization": f"Bearer {token_1}"},
+    )
+    assert logout.status_code == 200
+
+    me_after = await async_client.get(
+        _USERS_ME_URL,
+        headers={"Authorization": f"Bearer {token_2}"},
+    )
+    assert me_after.status_code == 200

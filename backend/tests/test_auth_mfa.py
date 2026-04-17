@@ -54,75 +54,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.audit_log import AuditLog
 from app.models.user import User
+from tests.helpers import REGISTER_URL, STRONG_PASSWORD, register_verify_login
 
-# ---------------------------------------------------------------------------
-# URL constants
-# ---------------------------------------------------------------------------
-_REGISTER_URL = "/api/v1/auth/register"
-_VERIFY_URL = "/api/v1/auth/verify-email"
+_REGISTER_URL = REGISTER_URL
 _LOGIN_URL = "/api/v1/auth/login"
 _MFA_SETUP_URL = "/api/v1/auth/mfa/setup"
 _MFA_ENABLE_URL = "/api/v1/auth/mfa/enable"
 _MFA_DISABLE_URL = "/api/v1/auth/mfa/disable"
 
-# ---------------------------------------------------------------------------
-# URL constants — Step 4
-# (Login URL is shared with the block above; listed here for readability.)
-# ---------------------------------------------------------------------------
-# _LOGIN_URL already defined above.
-
-_STRONG_PASSWORD = "StrongPass1!"
-
-
-# ---------------------------------------------------------------------------
-# Helper: register, verify email, and login — returns (user_id, access_token)
-# ---------------------------------------------------------------------------
-
-
-async def _register_verify_login(
-    async_client: AsyncClient,
-    capsys: pytest.CaptureFixture[str],
-    email: str,
-) -> tuple[str, str]:
-    """Register a user, verify their email, and log them in.
-
-    Returns the user UUID (as a string) and the access token so that MFA
-    setup tests can both call the endpoint and inspect DB state scoped to
-    the specific user.
-
-    Args:
-        async_client: Test HTTP client fixture.
-        capsys:       pytest stdout capture fixture (captures DEMO MODE token).
-        email:        Email address to register.
-
-    Returns:
-        A 2-tuple ``(user_id, access_token)``.
-    """
-    # Register
-    reg_resp = await async_client.post(
-        _REGISTER_URL,
-        json={"email": email, "password": _STRONG_PASSWORD},
-    )
-    assert reg_resp.status_code == 201
-    user_id: str = reg_resp.json()["id"]
-
-    # Capture the raw verification token printed to stdout (DEMO MODE).
-    captured = capsys.readouterr()
-    raw_token = captured.out.strip().rsplit(": ", maxsplit=1)[-1]
-
-    # Verify email
-    verify_resp = await async_client.get(_VERIFY_URL, params={"token": raw_token})
-    assert verify_resp.status_code == 200
-
-    # Login
-    login_resp = await async_client.post(
-        _LOGIN_URL,
-        json={"email": email, "password": _STRONG_PASSWORD},
-    )
-    assert login_resp.status_code == 200
-    access_token: str = login_resp.json()["access_token"]
-
-    return user_id, access_token
+_STRONG_PASSWORD = STRONG_PASSWORD
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +81,7 @@ async def test_mfa_setup_returns_200_with_secret_and_qr(
     and returns the expected response shape (SR-04).
     """
     email = "mfa_setup_200@example.com"
-    _user_id, access_token = await _register_verify_login(async_client, capsys, email)
+    _user_id, access_token, _ = await register_verify_login(async_client, capsys, email)
 
     response = await async_client.post(
         _MFA_SETUP_URL,
@@ -183,7 +123,7 @@ async def test_mfa_setup_persists_secret_and_does_not_enable_mfa(
     TOTP code (Phase 4 enable step) before the gate is activated.
     """
     email = "mfa_setup_db@example.com"
-    user_id, access_token = await _register_verify_login(async_client, capsys, email)
+    user_id, access_token, _ = await register_verify_login(async_client, capsys, email)
 
     response = await async_client.post(
         _MFA_SETUP_URL,
@@ -218,7 +158,7 @@ async def test_mfa_setup_writes_audit_log(
     the event was recorded for this specific user.
     """
     email = "mfa_setup_audit@example.com"
-    user_id, access_token = await _register_verify_login(async_client, capsys, email)
+    user_id, access_token, _ = await register_verify_login(async_client, capsys, email)
 
     response = await async_client.post(
         _MFA_SETUP_URL,
@@ -266,7 +206,7 @@ async def test_mfa_setup_fails_when_already_enabled(
     Directly sets mfa_enabled=True in the DB to simulate an enrolled account.
     """
     email = "mfa_setup_already_enabled@example.com"
-    user_id, access_token = await _register_verify_login(async_client, capsys, email)
+    user_id, access_token, _ = await register_verify_login(async_client, capsys, email)
 
     # Simulate MFA already being enabled by mutating DB state directly.
     result = await db_session.execute(select(User).where(User.id == uuid.UUID(user_id)))
@@ -297,7 +237,7 @@ async def test_mfa_setup_overwrites_abandoned_secret(
     latest secret must be stored.  The two returned secrets must differ.
     """
     email = "mfa_setup_overwrite@example.com"
-    user_id, access_token = await _register_verify_login(async_client, capsys, email)
+    user_id, access_token, _ = await register_verify_login(async_client, capsys, email)
 
     # First setup call.
     first_resp = await async_client.post(
@@ -371,7 +311,7 @@ async def test_mfa_enable_valid_code_returns_200_and_activates_mfa(
     5. An MFA_ENABLED audit log entry is recorded (SR-16).
     """
     email = "mfa_enable_valid@example.com"
-    user_id, access_token = await _register_verify_login(async_client, capsys, email)
+    user_id, access_token, _ = await register_verify_login(async_client, capsys, email)
 
     secret = await _setup_mfa_and_get_secret(async_client, access_token)
 
@@ -416,7 +356,7 @@ async def test_mfa_enable_invalid_code_returns_401_and_writes_mfa_failed_audit(
     failure is recorded before the exception is raised (SR-16).
     """
     email = "mfa_enable_invalid@example.com"
-    user_id, access_token = await _register_verify_login(async_client, capsys, email)
+    user_id, access_token, _ = await register_verify_login(async_client, capsys, email)
 
     await _setup_mfa_and_get_secret(async_client, access_token)
 
@@ -458,7 +398,7 @@ async def test_mfa_enable_without_prior_setup_returns_400(
     to verify against and must be rejected (SR-04).
     """
     email = "mfa_enable_no_setup@example.com"
-    _user_id, access_token = await _register_verify_login(async_client, capsys, email)
+    _user_id, access_token, _ = await register_verify_login(async_client, capsys, email)
 
     # Attempt enable without calling setup first.
     response = await async_client.post(
@@ -484,7 +424,7 @@ async def test_mfa_enable_when_already_enabled_returns_400(
     permitted without a disable step (SR-04).
     """
     email = "mfa_enable_already_on@example.com"
-    user_id, access_token = await _register_verify_login(async_client, capsys, email)
+    user_id, access_token, _ = await register_verify_login(async_client, capsys, email)
 
     secret = await _setup_mfa_and_get_secret(async_client, access_token)
 
@@ -526,7 +466,7 @@ async def test_mfa_enable_missing_totp_code_returns_422(
     must trigger Pydantic validation failure (422) before service logic runs.
     """
     email = "mfa_enable_no_code@example.com"
-    _user_id, access_token = await _register_verify_login(async_client, capsys, email)
+    _user_id, access_token, _ = await register_verify_login(async_client, capsys, email)
     await _setup_mfa_and_get_secret(async_client, access_token)
 
     resp = await async_client.post(
@@ -580,7 +520,7 @@ async def _register_verify_login_and_enable_mfa(
         string and ``totp_secret`` is the Base32-encoded TOTP secret stored on
         the account (needed to generate valid codes in the calling test).
     """
-    user_id, access_token = await _register_verify_login(async_client, capsys, email)
+    user_id, access_token, _ = await register_verify_login(async_client, capsys, email)
 
     # Initiate MFA setup — returns secret and QR code.
     setup_resp = await async_client.post(
@@ -752,9 +692,9 @@ async def test_login_without_mfa_still_works_after_step4(
     - token_type is "bearer"
     """
     email = "no_mfa_regression@example.com"
-    _user_id, access_token = await _register_verify_login(async_client, capsys, email)
+    _user_id, access_token, _ = await register_verify_login(async_client, capsys, email)
 
-    # _register_verify_login already performs a successful login and returns the
+    # register_verify_login already performs a successful login and returns the
     # access_token.  We assert here that the login step inside that helper did
     # in fact succeed with full tokens (not an mfa_required sentinel).
     assert isinstance(access_token, str) and len(access_token) > 0
@@ -965,7 +905,7 @@ async def test_mfa_disable_when_mfa_not_enabled_returns_400(
     an account must be rejected with HTTP 400 (SR-04).
     """
     email = "mfa_disable_not_enabled@example.com"
-    _user_id, access_token = await _register_verify_login(async_client, capsys, email)
+    _user_id, access_token, _ = await register_verify_login(async_client, capsys, email)
 
     response = await async_client.post(
         _MFA_DISABLE_URL,
@@ -999,7 +939,7 @@ async def test_mfa_disable_missing_fields_returns_422(
     failure before any service logic runs.
     """
     email = f"mfa_dis_422_{id(body)}@example.com"
-    _user_id, access_token = await _register_verify_login(async_client, capsys, email)
+    _user_id, access_token, _ = await register_verify_login(async_client, capsys, email)
 
     resp = await async_client.post(
         _MFA_DISABLE_URL,
