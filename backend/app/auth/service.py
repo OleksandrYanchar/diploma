@@ -845,6 +845,75 @@ async def disable_mfa(
     await db.commit()
 
 
+async def change_password(
+    user: User,
+    current_password: str,
+    new_password: str,
+    db: AsyncSession,
+) -> None:
+    """Change the authenticated user's password after verifying the current one.
+
+    Verifies current_password against the stored Argon2id hash.
+    Enforces SR-01 strength policy on new_password before hashing.
+    Writes a PASSWORD_CHANGED audit log entry on success (SR-16).
+    Does not revoke existing sessions — see ADR-21.
+
+    Args:
+        user:             The authenticated User whose password is being changed.
+        current_password: The plaintext current password to verify against the
+                          stored Argon2id hash.
+        new_password:     The plaintext new password.  Must satisfy SR-01.
+        db:               An async SQLAlchemy session for the current request.
+
+    Raises:
+        HTTPException 401: If current_password does not match the stored hash.
+        HTTPException 422: If new_password fails the SR-01 strength policy.
+    """
+    # ------------------------------------------------------------------
+    # Step 1: Verify the supplied current password (SR-02).
+    # verify_password uses passlib's constant-time Argon2id comparison.
+    # ------------------------------------------------------------------
+    if not verify_password(current_password, user.hashed_password):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    # ------------------------------------------------------------------
+    # Step 2: Enforce the SR-01 strength policy on the new password.
+    # Checked before hashing to avoid burning Argon2 cost on a password
+    # that will be rejected anyway.
+    # ------------------------------------------------------------------
+    if not is_password_strong(new_password):
+        raise HTTPException(
+            status_code=422,
+            detail="Password does not meet strength requirements",
+        )
+
+    # ------------------------------------------------------------------
+    # Step 3: Hash and store the new password (SR-02).
+    # The plaintext new_password is never persisted.
+    # ------------------------------------------------------------------
+    user.hashed_password = hash_password(new_password)
+
+    # ------------------------------------------------------------------
+    # Step 4: Write the PASSWORD_CHANGED audit log entry (SR-16).
+    # The audit row and the password update are committed atomically so
+    # the user state and the audit record are always consistent.
+    # ------------------------------------------------------------------
+    db.add(
+        AuditLog(
+            user_id=user.id,
+            action="PASSWORD_CHANGED",
+            ip_address=None,
+            details={"email": user.email},
+        )
+    )
+
+    # ------------------------------------------------------------------
+    # Step 5: Commit both the password update and the audit entry.
+    # Session revocation is intentionally omitted — see ADR-21.
+    # ------------------------------------------------------------------
+    await db.commit()
+
+
 async def setup_mfa(
     user: User,
     db: AsyncSession,

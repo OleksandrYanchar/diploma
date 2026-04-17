@@ -72,6 +72,7 @@ All admin endpoints require authentication. Role requirements are noted per endp
 | `PATCH` | `/admin/users/{user_id}/role` | ROLE:admin | Change a user's role (user → auditor, user → admin, etc.). Audit logged. |
 | `GET` | `/admin/audit-logs` | ROLE:auditor | Query audit logs. Supports filtering by user_id, action type, date range, status. |
 | `GET` | `/admin/security-events` | ROLE:auditor | Query security events. Supports filtering by event type, severity, user_id, date range. |
+| `GET` | `/admin/ping` | ROLE:admin + VERIFIED | Phase 4 RBAC test anchor. Intentionally minimal placeholder — returns `{"status": "ok"}`. Will be superseded by real admin endpoints in Phase 7. |
 
 ---
 

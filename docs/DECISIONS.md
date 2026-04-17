@@ -416,6 +416,35 @@ The TOTP secret is stored in `users.mfa_secret` as a raw Base32 string.  Two enc
 
 ---
 
+## ADR-21 — Password Change Does Not Revoke Existing Sessions (Phase 4)
+
+**Status:** Accepted (Phase 4 MVP); revisit in Phase 6.
+
+**Context:**
+`POST /auth/password/change` is a deliberate action performed by an already-authenticated user.  Session revocation on credential change is a valid security hardening measure — it evicts any attacker who has hijacked an active session and would otherwise survive a password change.
+
+**Options considered:**
+
+| Option | Security benefit | Complexity | UX impact |
+|--------|----------------|-----------|-----------|
+| Revoke all sessions on password change | Closes hijacked-session window after password change | Requires iterating all active Redis session keys for the user | User is immediately logged out; must re-authenticate |
+| No session revocation (chosen for Phase 4) | None at time of change; hijacked session survives | None | No disruption to the legitimate user's current session |
+| Revoke all sessions except current | Closes hijacked-session window while keeping user logged in | Requires tracking which session_id belongs to the current request | Moderate complexity |
+
+**Decision:** `POST /auth/password/change` updates the hashed password and writes a `PASSWORD_CHANGED` audit log entry, but does not revoke active sessions or invalidate issued refresh tokens.
+
+**Decision rationale:**
+- The password change endpoint is a voluntary, in-session operation by the legitimate user.  The threat model for this flow differs materially from password reset (Phase 6), where an external actor may have triggered the reset link and the account may already be compromised.
+- SR-18 explicitly assigns session revocation to the password reset flow, not to the voluntary in-session change.
+- Evicting the current user from their own session immediately after a password change imposes friction that contradicts the Zero Trust principle of minimizing disruption for verified, in-session users.
+- Implementing full session revocation requires iterating all active Redis session keys for the user.  This adds complexity that is out of scope for Phase 4; the Phase 6 password reset implementation is the correct place to introduce and test this pattern consistently.
+
+**Residual risk:** An attacker holding a stolen session token (access token + matching Redis session) survives a password change by the legitimate user.  The correct remediation available today is explicit logout (SR-09 / SR-10), which terminates the session immediately, or admin deactivation (already implemented).
+
+**Status:** Accepted (Phase 4 MVP); revisit in Phase 6.  Phase 6 must evaluate whether voluntary password change should also trigger session revocation at that time, alongside the password reset session revocation already specified.
+
+---
+
 ## ADR-14 — Frontend Toolchain: npm + ESLint + Prettier + TypeScript Strict
 
 **Status:** Accepted

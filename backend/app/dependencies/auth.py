@@ -20,6 +20,7 @@ Security properties enforced:
 from __future__ import annotations
 
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 
 from fastapi import Depends, HTTPException
@@ -33,7 +34,7 @@ from app.core.config import Settings, get_settings
 from app.core.database import get_db
 from app.core.redis import get_redis
 from app.core.security import decode_access_token
-from app.models.user import User
+from app.models.user import User, UserRole
 
 
 async def get_current_user(
@@ -238,3 +239,78 @@ async def require_verified(
             status_code=403,
             detail="Email address is not verified",
         )
+
+
+def require_role(*roles: UserRole) -> Callable[[User], Awaitable[None]]:
+    """Factory that returns an async dependency enforcing RBAC role membership.
+
+    This factory is the primary mechanism for enforcing SR-11 (Role-Based Access
+    Control) on protected endpoints.  It must be declared alongside
+    ``get_current_user`` in any route handler where access must be restricted to
+    specific roles.
+
+    Each call to ``require_role(...)`` produces an independent async callable via
+    Python closure.  The ``roles`` tuple is captured in the inner function's
+    enclosing scope — two separate ``require_role(UserRole.ADMIN)`` calls on
+    different routes produce two independent callables that share no state.
+    This is standard Python closure behaviour and requires no special handling.
+
+    The dependency does NOT re-query the database.  It reads ``current_user.role``
+    from the already-loaded ``User`` object that ``get_current_user`` returns.
+    This keeps the per-request overhead to a single attribute lookup.
+
+    If the caller is not authenticated at all, ``get_current_user`` raises 401
+    (or 403 for a missing Authorization header) before this dependency is
+    evaluated.  ``require_role`` therefore never handles the unauthenticated case
+    and always receives a fully authenticated ``User`` object.
+
+    Usage in a route handler signature::
+
+        @router.get("/admin/resource")
+        async def admin_resource(
+            current_user: User = Depends(get_current_user),
+            _role: None = Depends(require_role(UserRole.ADMIN)),
+        ) -> ...:
+
+    Args:
+        *roles: One or more ``UserRole`` enum values that are permitted to access
+                the decorated endpoint.  Pass multiple values to allow a union of
+                roles (e.g. ``require_role(UserRole.ADMIN, UserRole.AUDITOR)``).
+
+    Returns:
+        An async callable suitable for use with FastAPI ``Depends()``.  The
+        callable itself returns ``None`` — it is used solely for its side effect
+        of raising ``HTTPException`` when the role check fails.
+
+    Raises (inner callable):
+        HTTPException 403: If ``current_user.role`` is not in the ``roles`` tuple.
+                           Uses 403 (Forbidden) rather than 401 (Unauthorized)
+                           because the caller is authenticated — the credential is
+                           valid but the role is insufficient (SR-11).
+    """
+
+    async def _check_role(
+        current_user: User = Depends(get_current_user),
+    ) -> None:
+        """Enforce that the authenticated user holds one of the required roles.
+
+        The ``roles`` tuple is captured from the enclosing ``require_role`` call
+        via closure — each factory invocation produces a distinct callable with
+        its own independent ``roles`` binding.
+
+        Args:
+            current_user: Authenticated ``User`` provided by ``get_current_user``.
+
+        Returns:
+            None (used solely for its side effect).
+
+        Raises:
+            HTTPException 403: If ``current_user.role`` is not in ``roles``.
+        """
+        if current_user.role not in roles:
+            raise HTTPException(
+                status_code=403,
+                detail="Insufficient permissions",
+            )
+
+    return _check_role
