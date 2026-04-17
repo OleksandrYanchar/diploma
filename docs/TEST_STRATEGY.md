@@ -438,6 +438,10 @@ Each implementation phase from `IMPLEMENTATION_PLAN.md` has a corresponding set 
 | `pytest` fixtures | Test state management | `verified_user`, `admin_user`, `client`, `test_db`, `test_redis` created per test function |
 | `pytest.mark.asyncio` | Marks async tests | Applied to all integration test functions |
 
+### Fixture email addresses
+
+The named role fixtures (`verified_user`, `admin_user`, `auditor_user`, `unverified_user`) each use a fixed email address. This works fine when a test uses one of these fixtures on its own. If a test needs an additional user of the same kind within the same scenario — for example, to verify that one user cannot access another user's data — create that extra user inline with a unique email (e.g. `f"user_{uuid4()}@example.com"`) rather than requesting the same fixture twice in the same test.
+
 ### Test file structure
 
 ```

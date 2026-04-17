@@ -246,6 +246,12 @@ async def async_client(
 # A synthetic session_id is embedded in every token so that get_current_user's
 # Redis session check (step 4) can be satisfied in integration tests by
 # seeding fake_redis with session:{session_id} = str(user.id).
+#
+# Note on fixed emails: each fixture below uses a fixed email address.
+# This is fine when a test uses the fixture on its own. If a test needs a
+# second user of the same kind in the same scenario (e.g. to test cross-user
+# isolation), create that extra user inline with a unique email such as
+# f"user_{uuid4()}@example.com" rather than requesting the same fixture twice.
 # ---------------------------------------------------------------------------
 
 _FIXTURE_SESSION_ID = "00000000-0000-0000-0000-000000000001"
