@@ -26,6 +26,7 @@ from app.core.config import Settings, get_settings
 from app.core.database import close_db, init_db
 from app.core.redis import close_redis, init_redis
 from app.routers.health import router as health_router
+from app.transactions.router import router as transactions_router
 from app.users.router import router as users_router
 
 
@@ -99,11 +100,13 @@ def create_application() -> FastAPI:
     # Phase 2: auth (registration, email verification; login/refresh added later).
     # Phase 4: users (GET /users/me), admin (GET /admin/ping — RBAC anchor).
     # Phase 5: accounts (GET /accounts/me with lazy seeding).
+    # Phase 5: transactions (POST /transactions/transfer with step-up gate).
     application.include_router(health_router, prefix="/api/v1")
     application.include_router(auth_router, prefix="/api/v1")
     application.include_router(users_router, prefix="/api/v1")
     application.include_router(admin_router, prefix="/api/v1")
     application.include_router(accounts_router, prefix="/api/v1")
+    application.include_router(transactions_router, prefix="/api/v1")
 
     return application
 
