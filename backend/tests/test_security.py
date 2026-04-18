@@ -19,7 +19,9 @@ from jwt import InvalidTokenError
 from app.core.config import Settings
 from app.core.security import (
     create_access_token,
+    create_step_up_token,
     decode_access_token,
+    decode_step_up_token,
     generate_refresh_token,
     hash_password,
     hash_token,
@@ -393,3 +395,150 @@ def test_hash_token_different_inputs_differ() -> None:
     token — a hash collision attack on the token store.
     """
     assert hash_token("token-one") != hash_token("token-two")
+
+
+# ---------------------------------------------------------------------------
+# create_step_up_token
+# ---------------------------------------------------------------------------
+
+
+def test_create_step_up_token_contains_expected_claims() -> None:
+    """The step-up token payload must contain sub, jti, typ, iat, and exp.
+
+    Security property (SR-13, SR-14): the JTI is required for one-time-use
+    enforcement in Redis.  The typ='step_up' claim prevents the token from
+    being submitted as a regular bearer token.
+    """
+    token, jti = create_step_up_token(subject="user-id-123", settings=_TEST_SETTINGS)
+    payload = jwt.decode(
+        token,
+        _TEST_SETTINGS.jwt_secret_key,
+        algorithms=[_TEST_SETTINGS.jwt_algorithm],
+    )
+
+    assert payload["sub"] == "user-id-123"
+    assert payload["typ"] == "step_up"
+    assert payload["jti"] == jti
+    assert "exp" in payload
+    assert "iat" in payload
+
+
+def test_create_step_up_token_expires_at_configured_ttl() -> None:
+    """The step-up token's exp must equal iat plus step_up_token_expire_minutes.
+
+    Security property (SR-13): step-up tokens expire after 5 minutes.  A
+    longer TTL would widen the window during which a stolen token could be
+    replayed for a sensitive transfer.
+    """
+    token, _ = create_step_up_token(subject="user-id-123", settings=_TEST_SETTINGS)
+    payload = jwt.decode(
+        token,
+        _TEST_SETTINGS.jwt_secret_key,
+        algorithms=[_TEST_SETTINGS.jwt_algorithm],
+    )
+
+    expected_lifetime_seconds = _TEST_SETTINGS.step_up_token_expire_minutes * 60
+    actual_lifetime_seconds = payload["exp"] - payload["iat"]
+
+    assert abs(actual_lifetime_seconds - expected_lifetime_seconds) <= 2
+
+
+def test_create_step_up_token_returns_unique_jtis() -> None:
+    """Two calls must produce different JTI values.
+
+    Security property (SR-14): the JTI is the one-time-use key stored in Redis.
+    If two tokens could share a JTI, consuming one would also invalidate the
+    other — and a predictable JTI could be pre-empted by an attacker.
+    """
+    _, jti_a = create_step_up_token(subject="user-id-123", settings=_TEST_SETTINGS)
+    _, jti_b = create_step_up_token(subject="user-id-123", settings=_TEST_SETTINGS)
+    assert jti_a != jti_b
+
+
+# ---------------------------------------------------------------------------
+# decode_step_up_token
+# ---------------------------------------------------------------------------
+
+
+def test_decode_step_up_token_valid() -> None:
+    """decode_step_up_token returns the correct payload for a valid token.
+
+    Security property (SR-13): a freshly issued step-up token must decode
+    successfully and its claims must match the values used at issuance.
+    """
+    token, jti = create_step_up_token(subject="user-xyz", settings=_TEST_SETTINGS)
+    payload = decode_step_up_token(token, _TEST_SETTINGS)
+
+    assert payload["sub"] == "user-xyz"
+    assert payload["typ"] == "step_up"
+    assert payload["jti"] == jti
+
+
+def test_decode_step_up_token_expired() -> None:
+    """decode_step_up_token raises InvalidTokenError for an expired token.
+
+    Security property (SR-13): expired step-up tokens must be unconditionally
+    rejected.  A 5-minute TTL is only meaningful if expiry is enforced.
+    """
+    from datetime import datetime, timezone
+
+    now = datetime.now(tz=timezone.utc)
+    payload = {
+        "sub": "user-xyz",
+        "jti": "test-jti",
+        "typ": "step_up",
+        "iat": now - timedelta(seconds=2),
+        "exp": now - timedelta(seconds=1),
+    }
+    expired_token = jwt.encode(
+        payload,
+        _TEST_SETTINGS.jwt_secret_key,
+        algorithm=_TEST_SETTINGS.jwt_algorithm,
+    )
+
+    try:
+        decode_step_up_token(expired_token, _TEST_SETTINGS)
+        assert False, "Expected InvalidTokenError was not raised"  # noqa: B011
+    except InvalidTokenError:
+        pass
+
+
+def test_decode_step_up_token_rejects_access_token() -> None:
+    """decode_step_up_token raises InvalidTokenError when typ is 'access'.
+
+    Security property (SR-13): a regular access token (typ='access') must not
+    be accepted as a step-up token.  Without this check an attacker could reuse
+    their normal bearer token to satisfy the step-up gate without re-verifying
+    their TOTP code.
+    """
+    access_token = create_access_token(
+        subject="user-xyz",
+        role="user",
+        session_id="sess-abc",
+        settings=_TEST_SETTINGS,
+    )
+
+    try:
+        decode_step_up_token(access_token, _TEST_SETTINGS)
+        assert False, "Expected InvalidTokenError was not raised"  # noqa: B011
+    except InvalidTokenError:
+        pass
+
+
+def test_decode_step_up_token_rejects_tampered_signature() -> None:
+    """decode_step_up_token raises InvalidTokenError on a tampered signature.
+
+    Security property (SR-13): a step-up token with a forged signature must be
+    rejected.  This prevents an attacker from crafting an arbitrary step-up
+    token without holding the server's signing secret.
+    """
+    token, _ = create_step_up_token(subject="user-xyz", settings=_TEST_SETTINGS)
+    parts = token.split(".")
+    parts[2] = parts[2][:-4] + "XXXX"
+    tampered = ".".join(parts)
+
+    try:
+        decode_step_up_token(tampered, _TEST_SETTINGS)
+        assert False, "Expected InvalidTokenError was not raised"  # noqa: B011
+    except InvalidTokenError:
+        pass

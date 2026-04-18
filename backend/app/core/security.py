@@ -6,6 +6,7 @@ authentication layer:
 - Password hashing and verification (Argon2id, SR-02)
 - Password strength policy enforcement (SR-01)
 - JWT access token creation and decoding (SR-06)
+- Step-up token creation and decoding (SR-13, SR-14)
 - Refresh token generation and hashing (SR-07)
 - Generic token hashing for DB storage (SR-03, SR-07, SR-18)
 
@@ -224,6 +225,98 @@ def decode_access_token(token: str, settings: Settings) -> dict[str, Any]:
 
     if payload.get("typ") != "access":
         raise InvalidTokenError("Token type is not 'access'.")
+
+    return payload
+
+
+def create_step_up_token(subject: str, settings: Settings) -> tuple[str, str]:
+    """Create a signed JWT step-up token for elevated-privilege operations.
+
+    Enforces SR-13 (step-up authentication for sensitive transfers) and
+    SR-14 (step-up token is single-use, tracked by JTI in Redis).
+
+    The token payload carries:
+    - ``sub``  — user ID (must match the bearer token sub on the transfer request)
+    - ``jti``  — UUID4; the ``require_step_up`` dependency stores this in Redis
+                 as a one-time-use flag and deletes it on first consumption
+    - ``typ``  — fixed to ``"step_up"``; ``decode_access_token`` rejects this
+                 type so the token cannot be submitted as a regular bearer token
+    - ``iat``  — issued-at timestamp (UTC)
+    - ``exp``  — expiry timestamp (UTC, iat + step_up_token_expire_minutes)
+
+    The ``typ`` separation is a critical security control: both access tokens
+    and step-up tokens share the same signing key and algorithm.  Without the
+    ``typ`` check, a step-up token could be submitted as a bearer token on any
+    protected endpoint, bypassing the TOTP re-verification requirement.
+
+    Args:
+        subject:  String representation of the authenticated user's UUID.
+        settings: Application settings providing the signing key, algorithm,
+                  and step-up token lifetime.
+
+    Returns:
+        A 2-tuple of (compact JWS string, jti string).  The caller stores the
+        JTI in Redis under ``step_up:{jti}`` with TTL equal to the token
+        lifetime so that the ``require_step_up`` dependency can locate and
+        consume it exactly once.
+    """
+    now = datetime.now(tz=timezone.utc)
+    expire = now + timedelta(minutes=settings.step_up_token_expire_minutes)
+    jti = str(uuid.uuid4())
+
+    payload: dict[str, Any] = {
+        "sub": subject,
+        "jti": jti,
+        "typ": "step_up",
+        "iat": now,
+        "exp": expire,
+    }
+
+    token = jwt.encode(
+        payload,
+        settings.jwt_secret_key,
+        algorithm=settings.jwt_algorithm,
+    )
+    return token, jti
+
+
+def decode_step_up_token(token: str, settings: Settings) -> dict[str, Any]:
+    """Decode and validate a JWT step-up token, returning its payload.
+
+    Enforces SR-13 (step-up token must be valid and unexpired) and guards
+    against regular access tokens being submitted in place of a step-up
+    token by checking ``typ == "step_up"``.
+
+    The ``typ`` check mirrors the guard in ``decode_access_token``: because
+    both token types share the same signing key, the type claim is the only
+    mechanism preventing cross-type substitution attacks.
+
+    Raises ``InvalidTokenError`` on:
+    - Expired token (``exp`` in the past)
+    - Invalid or tampered signature
+    - Wrong algorithm
+    - Missing or wrong ``typ`` claim (e.g. an access token submitted here)
+    - Any other decoding failure
+
+    Args:
+        token:    The compact JWT string to validate.
+        settings: Application settings providing the signing key and algorithm.
+
+    Returns:
+        The decoded payload dict if all checks pass.  Callers must then
+        verify the JTI against Redis to enforce single-use semantics (SR-14).
+
+    Raises:
+        InvalidTokenError: On any validation failure.
+    """
+    payload: dict[str, Any] = jwt.decode(
+        token,
+        settings.jwt_secret_key,
+        algorithms=[settings.jwt_algorithm],
+    )
+
+    if payload.get("typ") != "step_up":
+        raise InvalidTokenError("Token type is not 'step_up'.")
 
     return payload
 
