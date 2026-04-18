@@ -30,7 +30,7 @@ from decimal import Decimal
 from fastapi import HTTPException
 from jwt import InvalidTokenError
 from redis.asyncio import Redis
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
@@ -39,7 +39,11 @@ from app.models.account import Account, AccountStatus
 from app.models.audit_log import AuditLog
 from app.models.transaction import Transaction, TransactionStatus, TransactionType
 from app.models.user import User
-from app.schemas.transaction import TransferRequest
+from app.schemas.transaction import (
+    TransactionHistoryResponse,
+    TransactionResponse,
+    TransferRequest,
+)
 
 
 async def _write_audit(
@@ -390,3 +394,119 @@ async def execute_transfer(
     # Step 11: Return the completed Transaction row.
     # ------------------------------------------------------------------
     return transaction
+
+
+async def get_transaction_history(
+    current_user: User,
+    db: AsyncSession,
+    page: int,
+    page_size: int,
+) -> TransactionHistoryResponse:
+    """Return a paginated list of transactions for the authenticated user.
+
+    User scoping: the account is always resolved by ``user_id = current_user.id``.
+    The client never supplies an account ID, which prevents horizontal access to
+    other users' transaction history (SR-12).
+
+    If the user has no account, an empty response is returned — this is not an
+    error, it simply means the user has not yet opened an account.
+
+    Pagination: ``page`` is 1-indexed; ``page_size`` controls the number of rows
+    returned.  Both are validated at the route layer before this function is
+    called.
+
+    An audit log entry (TRANSACTIONS_VIEWED) is written after every successful
+    fetch — including empty ones — and committed immediately (SR-16).
+
+    Args:
+        current_user: The authenticated and verified User making the request.
+        db:           Active async database session.
+        page:         1-indexed page number (must be >= 1).
+        page_size:    Number of transactions per page (must be 1–100).
+
+    Returns:
+        ``TransactionHistoryResponse`` containing a paginated list of
+        ``TransactionResponse`` items, the total count, current page, and
+        page size.
+    """
+    # ------------------------------------------------------------------
+    # Step 1: Resolve the user's account.
+    # Filtered strictly by user_id — no account ID is accepted from the
+    # client (SR-12).
+    # ------------------------------------------------------------------
+    account_result = await db.execute(
+        select(Account).where(Account.user_id == current_user.id)
+    )
+    account: Account | None = account_result.scalar_one_or_none()
+
+    # ------------------------------------------------------------------
+    # Step 2: Early return if the user has no account.
+    # This is a legitimate state (user registered but never opened an
+    # account).  Return an empty response rather than a 4xx error.
+    # ------------------------------------------------------------------
+    if account is None:
+        await _write_audit(
+            db=db,
+            user_id=current_user.id,
+            action="TRANSACTIONS_VIEWED",
+            details={"page": page, "page_size": page_size, "total": 0},
+        )
+        return TransactionHistoryResponse(
+            items=[],
+            total=0,
+            page=page,
+            page_size=page_size,
+        )
+
+    # ------------------------------------------------------------------
+    # Step 3: Count total matching transactions.
+    # A transaction belongs to the user if their account appears on
+    # either side (sender or receiver).
+    # ------------------------------------------------------------------
+    count_result = await db.execute(
+        select(func.count()).where(
+            (Transaction.from_account_id == account.id)
+            | (Transaction.to_account_id == account.id)
+        )
+    )
+    total: int = count_result.scalar_one()
+
+    # ------------------------------------------------------------------
+    # Step 4: Fetch the requested page.
+    # ORDER BY created_at DESC so the most recent transactions appear
+    # first.  OFFSET is 0-indexed, so page 1 starts at offset 0.
+    # ------------------------------------------------------------------
+    offset = (page - 1) * page_size
+    rows_result = await db.execute(
+        select(Transaction)
+        .where(
+            (Transaction.from_account_id == account.id)
+            | (Transaction.to_account_id == account.id)
+        )
+        .order_by(Transaction.created_at.desc())
+        .limit(page_size)
+        .offset(offset)
+    )
+    rows = rows_result.scalars().all()
+
+    # ------------------------------------------------------------------
+    # Step 5: Write TRANSACTIONS_VIEWED audit log and commit (SR-16).
+    # ------------------------------------------------------------------
+    await _write_audit(
+        db=db,
+        user_id=current_user.id,
+        action="TRANSACTIONS_VIEWED",
+        details={
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "account_id": str(account.id),
+        },
+    )
+
+    return TransactionHistoryResponse(
+        items=[TransactionResponse.model_validate(t) for t in rows],
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
