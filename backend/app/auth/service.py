@@ -2,10 +2,11 @@
 
 This module implements the core business logic for user registration, email
 address verification, login with session creation, logout with session
-teardown, refresh token rotation with reuse detection, and TOTP MFA
-enrollment.  It has no HTTP concerns: no Request or Response objects, no
-dependency injection containers.  All inputs are plain Python values; the
-caller (router) is responsible for extracting them from the HTTP layer.
+teardown, refresh token rotation with reuse detection, TOTP MFA enrollment,
+and step-up token issuance.  It has no HTTP concerns: no Request or Response
+objects, no dependency injection containers.  All inputs are plain Python
+values; the caller (router) is responsible for extracting them from the HTTP
+layer.
 
 Security properties enforced:
 - SR-01: Password strength validated via ``is_password_strong`` before hashing.
@@ -23,9 +24,13 @@ Security properties enforced:
 - SR-09: Access token JTI blacklisted in Redis on logout with remaining TTL.
 - SR-10: Redis session created on login keyed by session_id; deleted on logout or
   on reuse detection.
+- SR-13: Step-up token issued after TOTP re-verification for sensitive operations.
+- SR-14: Step-up token stored as a one-time-use marker in Redis under
+  ``step_up:{jti}``; consumed by ``require_step_up`` on first use.
 - SR-16: Audit log entries created for REGISTER, EMAIL_VERIFIED, LOGIN_SUCCESS,
   LOGIN_FAILED, LOGOUT, TOKEN_REFRESHED, MFA_SETUP_INITIATED, MFA_ENABLED,
-  MFA_FAILED, LOGIN_MFA_REQUIRED, and MFA_VERIFIED events.
+  MFA_FAILED, LOGIN_MFA_REQUIRED, MFA_VERIFIED, STEP_UP_VERIFIED, and
+  STEP_UP_FAILED events.
 """
 
 from __future__ import annotations
@@ -41,6 +46,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings
 from app.core.security import (
     create_access_token,
+    create_step_up_token,
     generate_refresh_token,
     hash_password,
     hash_token,
@@ -912,6 +918,118 @@ async def change_password(
     # Session revocation is intentionally omitted — see ADR-21.
     # ------------------------------------------------------------------
     await db.commit()
+
+
+async def verify_step_up(
+    user: User,
+    totp_code: str,
+    db: AsyncSession,
+    redis: Redis,  # type: ignore[type-arg]
+    settings: Settings,
+) -> str:
+    """Verify a TOTP code and issue a short-lived step-up JWT.
+
+    Enforces SR-13 (step-up re-authentication before sensitive operations)
+    and SR-14 (one-time-use step-up token stored in Redis under
+    ``step_up:{jti}``).
+
+    The caller must be a fully authenticated, verified user who has MFA
+    enabled.  A fresh TOTP code from their authenticator app is required
+    on every call — the code cannot be the same as one accepted in the
+    most recent login (replay risk is bounded by the TOTP window, ~90 s).
+
+    On success, the step-up JTI is stored in Redis with a TTL equal to
+    ``settings.step_up_token_expire_minutes * 60`` seconds.  The
+    ``require_step_up`` dependency (Phase 6) will look up this key on the
+    sensitive endpoint and delete it on first consumption, enforcing the
+    single-use property (SR-14).
+
+    On failure, a ``STEP_UP_FAILED`` audit log entry is committed BEFORE
+    raising so that the failure event is always persisted regardless of any
+    exception handling above this call site — matching the pattern used by
+    ``enable_mfa`` and ``login`` TOTP failure paths (SR-16).
+
+    Args:
+        user:      The authenticated, verified User requesting step-up.
+        totp_code: The six-to-eight-digit TOTP code from the authenticator app.
+        db:        An async SQLAlchemy session for the current request.
+        redis:     The shared async Redis client for step-up token storage.
+        settings:  Application settings supplying token lifetime and signing key.
+
+    Returns:
+        The compact step-up JWT string.  The caller (router) wraps this in
+        a ``StepUpResponse`` and returns it to the client.
+
+    Raises:
+        HTTPException 403: If ``user.mfa_enabled`` is False.  Step-up
+            authentication requires an active MFA gate — without one there
+            is no second factor to re-verify.
+        HTTPException 401: If the supplied TOTP code is invalid.  A
+            ``STEP_UP_FAILED`` audit log entry is committed before raising.
+    """
+    # ------------------------------------------------------------------
+    # Step 1: Enforce the MFA prerequisite.
+    # Step-up is meaningless without an enrolled second factor.  An account
+    # that never enrolled MFA cannot prove elevated intent via TOTP.
+    # ------------------------------------------------------------------
+    if not user.mfa_enabled:
+        raise HTTPException(
+            status_code=403,
+            detail="MFA must be enabled to use step-up authentication",
+        )
+
+    # ------------------------------------------------------------------
+    # Step 2: Verify the TOTP code (SR-13).
+    # On failure: commit the audit entry BEFORE raising so the event is
+    # always persisted (SR-16), matching the pattern used for login and
+    # enable_mfa failure paths.
+    # ------------------------------------------------------------------
+    if not verify_totp_code(user.mfa_secret, totp_code):
+        db.add(
+            AuditLog(
+                user_id=user.id,
+                action="STEP_UP_FAILED",
+                ip_address=None,
+                details={"reason": "invalid_totp_code"},
+            )
+        )
+        await db.commit()
+        raise HTTPException(status_code=401, detail="Invalid TOTP code")
+
+    # ------------------------------------------------------------------
+    # Step 3: Mint the step-up JWT (SR-13).
+    # ``create_step_up_token`` returns (token, jti).  The ``typ="step_up"``
+    # claim ensures that ``decode_access_token`` rejects this token if it
+    # is submitted as a regular bearer credential.
+    # ------------------------------------------------------------------
+    token, jti = create_step_up_token(subject=str(user.id), settings=settings)
+
+    # ------------------------------------------------------------------
+    # Step 4: Store the one-time-use marker in Redis (SR-14).
+    # The key is ``step_up:{jti}``.  The TTL matches the token lifetime so
+    # the marker is automatically cleaned up when the token expires.
+    # ``require_step_up`` will delete this key on first consumption.
+    # ------------------------------------------------------------------
+    ttl_seconds = settings.step_up_token_expire_minutes * 60
+    await redis.set(f"step_up:{jti}", str(user.id), ex=ttl_seconds)
+
+    # ------------------------------------------------------------------
+    # Step 5: Write the success audit log entry (SR-16) and commit.
+    # The audit row and the Redis write are not transactional together;
+    # the Redis write is the authoritative record for the one-time-use
+    # check.  The audit row exists for the human-readable audit trail.
+    # ------------------------------------------------------------------
+    db.add(
+        AuditLog(
+            user_id=user.id,
+            action="STEP_UP_VERIFIED",
+            ip_address=None,
+            details={"jti": jti},
+        )
+    )
+    await db.commit()
+
+    return token
 
 
 async def setup_mfa(
