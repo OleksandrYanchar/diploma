@@ -283,7 +283,7 @@ These tests **must pass** before the thesis can be defended. They directly verif
 
 ---
 
-## 5a. T-ID → Test Function Mapping (Phases 1–4)
+## 5a. T-ID → Test Function Mapping (Phases 1–5)
 
 The table below maps each MVP-critical test identifier to the concrete pytest
 function that implements it, or notes that the test is deferred to a later
@@ -302,10 +302,10 @@ are listed as "Phase N — not yet implemented".
 | T-08 | `test_protected_endpoint_rejects_missing_redis_session` | `test_get_current_user.py` | Implemented |
 | T-09 | `test_admin_ping_user_role_returns_403` | `test_rbac.py` | Implemented |
 | T-10 | `test_admin_ping_unauthenticated_returns_403` | `test_rbac.py` | Implemented |
-| T-11 | — | — | Phase 5 — not yet implemented |
-| T-12 | — | — | Phase 5 — not yet implemented |
-| T-13 | — | — | Phase 5 — not yet implemented |
-| T-14 | — | — | Phase 5 — not yet implemented |
+| T-11 | `test_get_account_scoped_to_authenticated_user` | `test_accounts.py` | Implemented |
+| T-12 | `test_transfer_above_threshold_missing_step_up` | `test_transfers.py` | Implemented |
+| T-13 | `test_transfer_above_threshold_with_valid_step_up` | `test_transfers.py` | Implemented |
+| T-14 | `test_transfer_above_threshold_consumed_step_up` | `test_transfers.py` | Implemented |
 | T-15 | — | — | Phase 7 — not yet implemented |
 | T-16 | `test_login_audit_log_written_on_success` | `test_auth_login.py` | Implemented |
 | T-17 | — | — | Phase 6 — not yet implemented |
@@ -313,7 +313,9 @@ are listed as "Phase N — not yet implemented".
 | T-19 | `test_register_weak_password_returns_422` | `test_auth_register.py` | Implemented |
 | T-20 | — | — | Phase 6 — not yet implemented |
 
-**12 of 20** MVP-critical tests are implemented as of the end of Phase 4.
+**16 of 20** MVP-critical tests are implemented as of the end of Phase 5.
+The remaining four (T-15, T-17, T-18, T-20) are scheduled for Phase 6
+(password reset + security events) and Phase 7 (rate limiting).
 
 ---
 

@@ -512,3 +512,312 @@ async def test_transfer_audit_logs_written(
         )
         log: AuditLog | None = result.scalar_one_or_none()
         assert log is not None, f"Expected audit log entry for action='{action}'"
+
+
+# ---------------------------------------------------------------------------
+# Additional schema-level validation (SR-20)
+# ---------------------------------------------------------------------------
+
+
+async def test_transfer_three_decimal_places_returns_422(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    fake_redis: object,
+) -> None:
+    """Amount with 3 decimal places is rejected with 422 at the schema layer.
+
+    Security property (SR-20): ``TransferRequest.amount`` enforces a maximum
+    of 2 decimal places via a ``field_validator``.  Amounts with more precision
+    are rejected before the service is called, preventing rounding drift in
+    the Numeric(18,2) balance column.
+    """
+    user, token = await make_orm_user(
+        db_session,
+        fake_redis,
+        email=f"decimal_{uuid.uuid4()}@example.com",
+    )
+    await _make_account(db_session, user.id)
+
+    response = await async_client.post(
+        TRANSFER_URL,
+        json={"to_account_number": "AABBCCDD11223344", "amount": "10.123"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Destination account status rejections (T-02)
+# ---------------------------------------------------------------------------
+
+
+async def test_transfer_to_inactive_destination_returns_400(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    fake_redis: object,
+) -> None:
+    """Transfer to an INACTIVE destination account is rejected with 400.
+
+    Security property (T-02): inactive destination accounts must not receive
+    funds.  The service validates destination status after resolving by
+    account_number and rejects with a generic 400.
+    """
+    sender, sender_token = await make_orm_user(
+        db_session,
+        fake_redis,
+        email=f"sender_inactive_{uuid.uuid4()}@example.com",
+    )
+    recipient, _ = await make_orm_user(
+        db_session,
+        fake_redis,
+        email=f"recipient_inactive_{uuid.uuid4()}@example.com",
+        session_id=f"00000000-0000-0000-aaaa-{uuid.uuid4().hex[:12]}",
+    )
+    await _make_account(db_session, sender.id, balance=Decimal("1000.00"))
+    dest_account = await _make_account(
+        db_session, recipient.id, status=AccountStatus.INACTIVE
+    )
+
+    response = await async_client.post(
+        TRANSFER_URL,
+        json={
+            "to_account_number": dest_account.account_number,
+            "amount": "50.00",
+        },
+        headers={"Authorization": f"Bearer {sender_token}"},
+    )
+    assert response.status_code == 400
+    assert "Destination account is not active" in response.json()["detail"]
+
+    # TRANSFER_REJECTED with reason=destination_not_active must be recorded.
+    result = await db_session.execute(
+        select(AuditLog).where(
+            AuditLog.user_id == sender.id,
+            AuditLog.action == "TRANSFER_REJECTED",
+        )
+    )
+    log = result.scalars().first()
+    assert log is not None
+    assert log.details is not None
+    assert log.details.get("reason") == "destination_not_active"
+
+
+async def test_transfer_to_frozen_destination_returns_400(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    fake_redis: object,
+) -> None:
+    """Transfer to a FROZEN destination account is rejected with 400.
+
+    Security property (T-02): frozen accounts are administratively locked
+    pending review and must not receive transfers.
+    """
+    sender, sender_token = await make_orm_user(
+        db_session,
+        fake_redis,
+        email=f"sender_frozen_{uuid.uuid4()}@example.com",
+    )
+    recipient, _ = await make_orm_user(
+        db_session,
+        fake_redis,
+        email=f"recipient_frozen_{uuid.uuid4()}@example.com",
+        session_id=f"00000000-0000-0000-9999-{uuid.uuid4().hex[:12]}",
+    )
+    await _make_account(db_session, sender.id, balance=Decimal("1000.00"))
+    dest_account = await _make_account(
+        db_session, recipient.id, status=AccountStatus.FROZEN
+    )
+
+    response = await async_client.post(
+        TRANSFER_URL,
+        json={
+            "to_account_number": dest_account.account_number,
+            "amount": "50.00",
+        },
+        headers={"Authorization": f"Bearer {sender_token}"},
+    )
+    assert response.status_code == 400
+    assert "Destination account is not active" in response.json()["detail"]
+
+    result = await db_session.execute(
+        select(AuditLog).where(
+            AuditLog.user_id == sender.id,
+            AuditLog.action == "TRANSFER_REJECTED",
+        )
+    )
+    log = result.scalars().first()
+    assert log is not None
+    assert log.details is not None
+    assert log.details.get("reason") == "destination_not_active"
+
+
+# ---------------------------------------------------------------------------
+# TRANSFER_REJECTED audit coverage for failure paths (SR-16)
+# ---------------------------------------------------------------------------
+
+
+async def test_transfer_rejected_audit_log_on_insufficient_balance(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    fake_redis: object,
+) -> None:
+    """Insufficient-balance rejection writes a TRANSFER_REJECTED audit row.
+
+    Security property (SR-16): every rejected transfer must produce an audit
+    record documenting the reason.  This supports non-repudiation for failed
+    attempts (e.g., attempted overdrafts).
+    """
+    sender, sender_token = await make_orm_user(
+        db_session,
+        fake_redis,
+        email=f"sender_lowbal_{uuid.uuid4()}@example.com",
+    )
+    recipient, _ = await make_orm_user(
+        db_session,
+        fake_redis,
+        email=f"recipient_lowbal_{uuid.uuid4()}@example.com",
+        session_id=f"00000000-0000-0000-8888-{uuid.uuid4().hex[:12]}",
+    )
+    await _make_account(db_session, sender.id, balance=Decimal("10.00"))
+    dest_account = await _make_account(db_session, recipient.id)
+
+    response = await async_client.post(
+        TRANSFER_URL,
+        json={
+            "to_account_number": dest_account.account_number,
+            "amount": "500.00",
+        },
+        headers={"Authorization": f"Bearer {sender_token}"},
+    )
+    assert response.status_code == 400
+
+    result = await db_session.execute(
+        select(AuditLog).where(
+            AuditLog.user_id == sender.id,
+            AuditLog.action == "TRANSFER_REJECTED",
+        )
+    )
+    log = result.scalars().first()
+    assert log is not None
+    assert log.details is not None
+    assert log.details.get("reason") == "insufficient_balance"
+
+
+async def test_transfer_rejected_audit_log_on_destination_not_found(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    fake_redis: object,
+) -> None:
+    """Destination-not-found rejection writes a TRANSFER_REJECTED audit row.
+
+    Security property (SR-16): the rejection reason is captured so that
+    repeated probes of non-existent account numbers are visible in the audit
+    stream (useful for detecting enumeration attempts).
+    """
+    user, token = await make_orm_user(
+        db_session,
+        fake_redis,
+        email=f"dest_nf_{uuid.uuid4()}@example.com",
+    )
+    await _make_account(db_session, user.id)
+
+    response = await async_client.post(
+        TRANSFER_URL,
+        json={"to_account_number": "NOTHERE000000000", "amount": "50.00"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 400
+
+    result = await db_session.execute(
+        select(AuditLog).where(
+            AuditLog.user_id == user.id,
+            AuditLog.action == "TRANSFER_REJECTED",
+        )
+    )
+    log = result.scalars().first()
+    assert log is not None
+    assert log.details is not None
+    assert log.details.get("reason") == "destination_not_found"
+
+
+async def test_transfer_rejected_and_bypass_audit_on_step_up_subject_mismatch(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    fake_redis: object,
+) -> None:
+    """Subject-mismatched step-up token writes BOTH audit rows.
+
+    Security properties:
+    - SR-13: A step-up token issued for user A cannot be used by user B.
+    - SR-16: The service must write a ``STEP_UP_BYPASS_ATTEMPT`` audit row
+      (mirroring ``require_step_up``) in addition to the ``TRANSFER_REJECTED``
+      audit row already produced by the transfer error path.
+    """
+    # User A — the step-up token is issued for this user.
+    user_a, _access_token_a = await make_orm_user(
+        db_session,
+        fake_redis,
+        email=f"bypass_user_a_{uuid.uuid4()}@example.com",
+    )
+    step_up_token_for_a, jti_a = create_step_up_token(
+        subject=str(user_a.id),
+        settings=_TEST_SETTINGS,
+    )
+    await fake_redis.set(f"step_up:{jti_a}", str(user_a.id), ex=300)  # type: ignore[union-attr]
+
+    # User B — the attacker who presents user A's step-up token.
+    user_b, access_token_b = await make_orm_user(
+        db_session,
+        fake_redis,
+        email=f"bypass_user_b_{uuid.uuid4()}@example.com",
+        session_id=f"00000000-0000-0000-7777-{uuid.uuid4().hex[:12]}",
+    )
+    await _make_account(db_session, user_b.id, balance=Decimal("5000.00"))
+    recipient, _ = await make_orm_user(
+        db_session,
+        fake_redis,
+        email=f"bypass_recipient_{uuid.uuid4()}@example.com",
+        session_id=f"00000000-0000-0000-6666-{uuid.uuid4().hex[:12]}",
+    )
+    dest_account = await _make_account(db_session, recipient.id)
+
+    response = await async_client.post(
+        TRANSFER_URL,
+        json={
+            "to_account_number": dest_account.account_number,
+            "amount": "1500.00",  # above $1000 threshold
+        },
+        headers={
+            "Authorization": f"Bearer {access_token_b}",
+            "X-Step-Up-Token": step_up_token_for_a,
+        },
+    )
+    assert response.status_code == 403
+    assert "mismatch" in response.json()["detail"].lower()
+
+    # Both audit rows must be attributed to user B (the caller).
+    bypass_result = await db_session.execute(
+        select(AuditLog).where(
+            AuditLog.user_id == user_b.id,
+            AuditLog.action == "STEP_UP_BYPASS_ATTEMPT",
+        )
+    )
+    bypass_log = bypass_result.scalars().first()
+    assert bypass_log is not None, (
+        "STEP_UP_BYPASS_ATTEMPT audit row must be written by the transfer "
+        "step-up validator on subject mismatch (SR-16)."
+    )
+    assert bypass_log.details is not None
+    assert bypass_log.details.get("reason") == "subject_mismatch"
+    assert bypass_log.details.get("token_sub") == str(user_a.id)
+
+    rejected_result = await db_session.execute(
+        select(AuditLog).where(
+            AuditLog.user_id == user_b.id,
+            AuditLog.action == "TRANSFER_REJECTED",
+        )
+    )
+    rejected_log = rejected_result.scalars().first()
+    assert rejected_log is not None
+    assert rejected_log.details is not None
+    assert rejected_log.details.get("reason") == "invalid_step_up"

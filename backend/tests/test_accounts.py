@@ -124,6 +124,66 @@ async def test_get_account_idempotent(
     assert len(rows) == 1
 
 
+async def test_get_account_scoped_to_authenticated_user(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    fake_redis: object,
+) -> None:
+    """Two users each see only their own account via GET /accounts/me (T-11).
+
+    Security property (SR-12): the endpoint must scope strictly by the
+    authenticated user.  No route parameter is accepted, and the account is
+    looked up by ``user_id = current_user.id``.  Neither user's response may
+    contain the other user's account identifier.
+    """
+    user_a, token_a = await make_orm_user(
+        db_session,
+        fake_redis,
+        email=f"user_a_{uuid.uuid4()}@example.com",
+    )
+    user_b, token_b = await make_orm_user(
+        db_session,
+        fake_redis,
+        email=f"user_b_{uuid.uuid4()}@example.com",
+        session_id=f"00000000-0000-0000-0000-{uuid.uuid4().hex[:12]}",
+    )
+
+    resp_a = await async_client.get(
+        ACCOUNTS_ME_URL,
+        headers={"Authorization": f"Bearer {token_a}"},
+    )
+    resp_b = await async_client.get(
+        ACCOUNTS_ME_URL,
+        headers={"Authorization": f"Bearer {token_b}"},
+    )
+    assert resp_a.status_code == 200
+    assert resp_b.status_code == 200
+
+    body_a = resp_a.json()
+    body_b = resp_b.json()
+
+    # Each user must receive a distinct account.
+    assert body_a["id"] != body_b["id"]
+    assert body_a["account_number"] != body_b["account_number"]
+
+    # Confirm DB-side ownership: each returned account belongs to the caller.
+    db_a_result = await db_session.execute(
+        select(Account).where(Account.user_id == user_a.id)
+    )
+    db_account_a = db_a_result.scalar_one()
+    db_b_result = await db_session.execute(
+        select(Account).where(Account.user_id == user_b.id)
+    )
+    db_account_b = db_b_result.scalar_one()
+
+    assert str(db_account_a.id) == body_a["id"]
+    assert str(db_account_b.id) == body_b["id"]
+
+    # Cross-check: neither response leaks the other user's account id.
+    assert body_a["id"] != str(db_account_b.id)
+    assert body_b["id"] != str(db_account_a.id)
+
+
 async def test_get_account_audit_log_written(
     async_client: AsyncClient,
     db_session: AsyncSession,

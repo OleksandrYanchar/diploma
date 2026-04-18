@@ -79,6 +79,7 @@ async def _validate_step_up_token(
     current_user: User,
     redis: Redis,  # type: ignore[type-arg]
     settings: Settings,
+    db: AsyncSession,
 ) -> None:
     """Validate the step-up token when a transfer meets the threshold.
 
@@ -88,12 +89,10 @@ async def _validate_step_up_token(
     Steps (mirroring ``require_step_up``):
     1. Header presence — raise 403 with ``X-Step-Up-Required: true`` if absent.
     2. JWT decode and type validation via ``decode_step_up_token``.
-    3. Subject binding — ``sub`` must equal ``str(current_user.id)``.
+    3. Subject binding — ``sub`` must equal ``str(current_user.id)``.  On
+       mismatch a ``STEP_UP_BYPASS_ATTEMPT`` audit log is committed BEFORE
+       raising, matching the behaviour of ``require_step_up`` (SR-16).
     4. Atomic single-use consumption via ``redis.getdel``.
-
-    Note: subject-mismatch audit is not written here because the service has
-    already committed TRANSFER_INITIATED at that point.  The 403 response is
-    sufficient to surface the attempted bypass.
 
     Args:
         x_step_up_token: Raw JWT from the ``X-Step-Up-Token`` request header,
@@ -101,6 +100,9 @@ async def _validate_step_up_token(
         current_user:    The authenticated User performing the transfer.
         redis:           Async Redis client used for the ``getdel`` operation.
         settings:        Application settings (signing key, algorithm).
+        db:              Active async database session (used to persist the
+                         ``STEP_UP_BYPASS_ATTEMPT`` audit row on subject
+                         mismatch).
 
     Raises:
         HTTPException 403: If the token is absent, invalid, expired, bound to
@@ -128,6 +130,20 @@ async def _validate_step_up_token(
     sub: str = payload["sub"]
 
     if sub != str(current_user.id):
+        # Commit the STEP_UP_BYPASS_ATTEMPT audit row BEFORE raising so the
+        # event is always persisted, matching the require_step_up dependency
+        # (SR-16).  The outer execute_transfer handler will additionally write
+        # a TRANSFER_REJECTED audit row from its except block.
+        await _write_audit(
+            db=db,
+            user_id=current_user.id,
+            action="STEP_UP_BYPASS_ATTEMPT",
+            details={
+                "reason": "subject_mismatch",
+                "token_sub": sub,
+                "current_user_id": str(current_user.id),
+            },
+        )
         raise HTTPException(
             status_code=403,
             detail="Step-up token subject mismatch",
@@ -333,6 +349,7 @@ async def execute_transfer(
                 current_user=current_user,
                 redis=redis,
                 settings=settings,
+                db=db,
             )
         except HTTPException:
             await _write_audit(
