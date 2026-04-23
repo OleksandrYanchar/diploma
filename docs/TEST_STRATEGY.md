@@ -405,16 +405,19 @@ Each implementation phase from `IMPLEMENTATION_PLAN.md` has a corresponding set 
 
 ### Phase 5 — Financial Logic + Step-up Authentication
 
-**Verification method:** Integration tests in `tests/test_step_up_auth.py`.
+**Verification method:** Integration tests across `tests/test_transfers.py` (transfer gate and audit), `tests/test_step_up.py` (step-up token issuance), `tests/test_require_step_up.py` (require\_step\_up dependency), `tests/test_accounts.py` (account scoping), and `tests/test_transaction_history.py` (history).
 
 | Test | SR |
 |------|----|
+| T-11: Two users each see only their own account via GET /accounts/me | SR-12 |
 | T-12: Large transfer without step-up → 403 + X-Step-Up-Required | SR-13 |
 | T-13: Large transfer with valid step-up → 200 | SR-13 |
 | T-14: Step-up token reuse → 403 | SR-14 |
-| Step-up token from different user → 403 | SR-13 |
+| Step-up token from different user → 403 + STEP\_UP\_BYPASS\_ATTEMPT audit | SR-13, SR-16 |
 | Transfer with negative amount → 422 | SR-20 |
-| Transfer with insufficient balance → 400 | — |
+| Transfer with amount exceeding 2 decimal places → 422 | SR-20 |
+| Transfer with insufficient balance → 400 + TRANSFER\_REJECTED audit | SR-16 |
+| Transfer to INACTIVE or FROZEN destination → 400 + TRANSFER\_REJECTED audit | SR-16 |
 | Transfer below threshold succeeds without step-up | SR-13 |
 
 ---
