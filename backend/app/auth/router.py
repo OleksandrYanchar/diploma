@@ -18,6 +18,8 @@ Exposes:
                                   (SR-04, SR-16)
 - POST /auth/password/change   -- change the authenticated user's password
                                   (SR-01, SR-02, SR-16; ADR-21)
+- POST /auth/step-up           -- verify TOTP and issue a short-lived step-up JWT
+                                  for sensitive operations (SR-13, SR-14, SR-16)
 
 Route handlers are intentionally thin: they extract HTTP inputs, delegate all
 business logic to ``auth.service``, and format the response.  No security
@@ -26,8 +28,9 @@ decisions are made here.
 Security note: /register, /verify-email, /login, and /refresh are unauthenticated
 by design -- /refresh accepts an expired access token intentionally, so it cannot
 require a valid Bearer credential.  /logout, /mfa/setup, /mfa/enable, /mfa/disable,
-and /password/change require a valid Bearer token via ``get_current_user``.  Rate
-limiting is enforced at the Nginx layer (SR-15).
+/password/change, and /step-up require a valid Bearer token via ``get_current_user``.
+/step-up additionally requires ``require_verified``.  Rate limiting is enforced at
+the Nginx layer (SR-15).
 """
 
 from __future__ import annotations
@@ -45,6 +48,7 @@ from app.auth.service import (
     register_user,
     setup_mfa,
     verify_email,
+    verify_step_up,
 )
 from app.auth.service import login as login_service
 from app.auth.service import logout as logout_service
@@ -64,6 +68,8 @@ from app.schemas.auth import (
     MFASetupResponse,
     PasswordChangeRequest,
     RefreshRequest,
+    StepUpRequest,
+    StepUpResponse,
     TokenResponse,
 )
 from app.schemas.user import UserCreate, UserResponse
@@ -519,3 +525,63 @@ async def password_change(
         db=db,
     )
     return {"detail": "Password changed successfully"}
+
+
+@router.post(
+    "/step-up",
+    response_model=StepUpResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Verify TOTP and issue a short-lived step-up token",
+)
+async def step_up(
+    body: StepUpRequest,
+    current_user: User = Depends(get_current_user),
+    _verified: None = Depends(require_verified),
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),  # type: ignore[type-arg]
+    settings: Settings = Depends(get_settings),
+) -> StepUpResponse:
+    """Verify a fresh TOTP code and issue a short-lived step-up JWT.
+
+    The step-up token authorises a single sensitive operation (e.g. a funds
+    transfer) within a short time window.  It is separate from the regular
+    access token so that the TOTP re-verification requirement is enforced at
+    the sensitive endpoint, not just at login time (SR-13).
+
+    The issued token has ``typ="step_up"`` and cannot be submitted as a
+    regular bearer credential — ``decode_access_token`` rejects it on
+    ``typ`` mismatch.  The JTI is stored in Redis under ``step_up:{jti}``
+    with a TTL equal to the token lifetime; ``require_step_up`` (Phase 6)
+    will consume it exactly once (SR-14).
+
+    MFA must be enabled on the account; without an enrolled second factor
+    there is no TOTP code to verify and the endpoint returns 403.
+
+    Args:
+        body:         Validated ``StepUpRequest`` containing the TOTP code.
+        current_user: Authenticated User provided by ``get_current_user``.
+        _verified:    Enforces email verification via ``require_verified`` (SR-03).
+        db:           Injected async database session.
+        redis:        Injected Redis client for step-up token storage (SR-14).
+        settings:     Injected application settings (signing key, token lifetime).
+
+    Returns:
+        A ``StepUpResponse`` containing ``step_up_token`` and ``expires_in``
+        (seconds) with HTTP 200.
+
+    Raises:
+        HTTPException 401: Missing or invalid bearer token.
+        HTTPException 401: TOTP code invalid (STEP_UP_FAILED audit log written).
+        HTTPException 403: Email not verified, or MFA not enabled on account.
+    """
+    token = await verify_step_up(
+        user=current_user,
+        totp_code=body.totp_code,
+        db=db,
+        redis=redis,
+        settings=settings,
+    )
+    return StepUpResponse(
+        step_up_token=token,
+        expires_in=settings.step_up_token_expire_minutes * 60,
+    )

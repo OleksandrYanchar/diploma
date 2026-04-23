@@ -66,11 +66,13 @@ class Account(Base):
     )
 
     # FK to the owning user.  Cascade delete is handled at the User level.
+    # unique=True enforces the one-account-per-user invariant at the DB level so
+    # that concurrent inserts cannot produce duplicate rows (migration 0004).
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
-        index=True,
+        unique=True,
     )
 
     # Lifecycle status — ACTIVE is the only state that permits transfers (T-02).
