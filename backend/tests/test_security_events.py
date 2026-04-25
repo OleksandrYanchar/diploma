@@ -164,6 +164,22 @@ async def test_account_locked_creates_high_security_event(
         len(audit_entries) > 0
     ), "At least one LOGIN_FAILED AuditLog row must exist (SR-16 regression guard)"
 
+    # Assert the ACCOUNT_LOCKED AuditLog entry was also written (SR-16).
+    # The SecurityEvent row satisfies SR-17 (automated monitoring); this entry
+    # satisfies SR-16 (human-readable audit trail) — both must be present.
+    locked_audit_result = await db_session.execute(
+        select(AuditLog).where(
+            AuditLog.action == "ACCOUNT_LOCKED",
+            AuditLog.user_id == user_id,
+        )
+    )
+    locked_audit = locked_audit_result.scalar_one_or_none()
+    assert (
+        locked_audit is not None
+    ), "AuditLog row with action=ACCOUNT_LOCKED must exist for the locked user (SR-16)"
+    assert locked_audit.details is not None
+    assert "locked_until" in locked_audit.details
+
 
 # ---------------------------------------------------------------------------
 # Event 2: TOKEN_REUSE (severity=CRITICAL) — T-20
