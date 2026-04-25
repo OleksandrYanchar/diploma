@@ -64,6 +64,7 @@ from app.core.totp import (
 )
 from app.models.audit_log import AuditLog
 from app.models.refresh_token import RefreshToken
+from app.models.security_event import SecurityEvent, Severity
 from app.models.user import User, UserRole
 
 # ---------------------------------------------------------------------------
@@ -328,6 +329,23 @@ async def login(
                 minutes=settings.account_lockout_minutes
             )
             user.failed_login_count = 0
+            # SR-17: Write a HIGH-severity SecurityEvent for the lockout so
+            # that automated monitoring and the admin role can detect brute-
+            # force attacks without scanning the full audit log (SR-16).
+            db.add(
+                SecurityEvent(
+                    user_id=user.id,
+                    event_type="ACCOUNT_LOCKED",
+                    severity=Severity.HIGH,
+                    ip_address=None,
+                    details={
+                        "failed_login_count": settings.max_failed_login_attempts,
+                        "locked_until": user.locked_until.isoformat()
+                        if user.locked_until
+                        else None,
+                    },
+                )
+            )
 
         audit_fail = AuditLog(
             user_id=user.id,
@@ -556,6 +574,22 @@ async def refresh_tokens(
         session_keys = [f"session:{rt.session_id}" for rt in all_user_tokens]
         if session_keys:
             await redis.delete(*session_keys)
+        # SR-17: Write a CRITICAL-severity SecurityEvent for token reuse so
+        # that the incident is distinguishable from normal 401s in automated
+        # monitoring dashboards.  All sessions for this user have already been
+        # revoked above; this write records the event for forensic correlation.
+        db.add(
+            SecurityEvent(
+                user_id=token_row.user_id,
+                event_type="TOKEN_REUSE",
+                severity=Severity.CRITICAL,
+                ip_address=None,
+                details={
+                    "session_id": str(token_row.session_id),
+                },
+            )
+        )
+        await db.commit()
         raise HTTPException(
             status_code=401,
             detail="Refresh token already used",
