@@ -1,7 +1,8 @@
-"""Tests for password-related auth service functions.
+"""Tests for password-related auth service functions and HTTP endpoints.
 
 Phase 4 Step 4 — POST /auth/password/change
 Phase 6 Step 2 — request_password_reset / confirm_password_reset service layer
+Phase 6 Step 3 — POST /auth/password/reset/request and /confirm HTTP endpoints
 
 Coverage:
 - Correct current_password + strong new_password → 200; PASSWORD_CHANGED audit
@@ -11,6 +12,9 @@ Coverage:
 - Weak new_password (fails SR-01) → 422; no PASSWORD_CHANGED audit log written.
 - No Authorization header → 403 (HTTPBearer behaviour).
 - Existing session is NOT revoked after password change (ADR-21 behaviour).
+- T-17: POST /auth/password/reset/request always returns 200 (SR-18 non-enumeration).
+- T-18: POST /auth/password/reset/confirm revokes all sessions and refresh tokens
+  after a successful reset (SR-07, SR-10).
 
 All tests create users inline with unique emails to avoid the UNIQUE constraint
 issue documented in conftest.py.  The verified_user fixture is not used to
@@ -703,3 +707,298 @@ async def test_password_reset_confirm_revokes_redis_sessions(
     ), "Decoy session for another user must not be deleted"
 
     await redis.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 Step 3 — HTTP-level tests for
+#   POST /api/v1/auth/password/reset/request
+#   POST /api/v1/auth/password/reset/confirm
+#
+# Token capture strategy: call request_password_reset() directly from the
+# service layer (already fully tested above) to obtain the raw token via
+# capsys, then use that token in HTTP calls to /confirm.  This avoids
+# mock complexity while keeping tests correct at the HTTP boundary.
+#
+# ADR-18: AuditLog queries always filter by both action AND user_id.
+# SR-18: /request must return HTTP 200 with identical body for any email.
+# ---------------------------------------------------------------------------
+
+_RESET_REQUEST_URL = "/api/v1/auth/password/reset/request"
+_RESET_CONFIRM_URL = "/api/v1/auth/password/reset/confirm"
+_REFRESH_URL = "/api/v1/auth/refresh"
+
+
+@pytest.mark.asyncio
+async def test_reset_request_nonexistent_email_returns_200(
+    async_client: AsyncClient,
+) -> None:
+    """T-17: POST /reset/request with an unknown email returns HTTP 200.
+
+    SR-18 non-enumeration: the endpoint must return the standard success
+    message even when the email is not in the database.  No error, no
+    distinguishing signal.
+    """
+    response = await async_client.post(
+        _RESET_REQUEST_URL,
+        json={"email": f"no_such_{uuid.uuid4().hex[:8]}@example.com"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "message": "If that email is registered, a reset link has been sent"
+    }
+
+
+@pytest.mark.asyncio
+async def test_reset_request_known_email_returns_200(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    fake_redis,
+) -> None:
+    """T-17 (complementary): POST /reset/request with a registered email returns 200.
+
+    SR-18 non-enumeration: the response is identical to the unknown-email
+    case.  An attacker cannot distinguish the two outcomes.
+    """
+    email = f"reset_http_known_{uuid.uuid4().hex[:8]}@example.com"
+    await make_orm_user(db_session, fake_redis, email)
+
+    response = await async_client.post(_RESET_REQUEST_URL, json={"email": email})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "message": "If that email is registered, a reset link has been sent"
+    }
+
+
+@pytest.mark.asyncio
+async def test_reset_request_stores_hash_on_known_email(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    fake_redis,
+) -> None:
+    """After POST /reset/request with a known email, password_reset_token_hash is set.
+
+    Verifies that the service side-effect (hash storage) is triggered when
+    the endpoint is called.  The raw token is never returned in the response.
+    """
+    email = f"reset_http_hash_{uuid.uuid4().hex[:8]}@example.com"
+    user, _ = await make_orm_user(db_session, fake_redis, email)
+
+    # Token hash must be absent before the request.
+    assert user.password_reset_token_hash is None
+
+    response = await async_client.post(_RESET_REQUEST_URL, json={"email": email})
+    assert response.status_code == 200
+
+    # Reload the user to observe the DB mutation.
+    result = await db_session.execute(select(User).where(User.id == user.id))
+    updated: User = result.scalar_one()
+    assert (
+        updated.password_reset_token_hash is not None
+    ), "password_reset_token_hash must be populated after /reset/request"
+    assert (
+        updated.password_reset_sent_at is not None
+    ), "password_reset_sent_at must be set after /reset/request"
+
+
+@pytest.mark.asyncio
+async def test_reset_confirm_valid_token_returns_200(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    fake_redis,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """POST /reset/confirm with a valid token returns HTTP 200.
+
+    Uses capsys to capture the raw token printed to stdout by
+    request_password_reset() in DEMO MODE, then submits that token to the
+    HTTP endpoint.
+    """
+    email = f"reset_http_ok_{uuid.uuid4().hex[:8]}@example.com"
+    await make_orm_user(db_session, fake_redis, email)
+
+    # Call the service directly to obtain the raw token from DEMO MODE output.
+    await request_password_reset(email=email, db=db_session, settings=_TEST_SETTINGS)
+    captured = capsys.readouterr()
+    raw_token = captured.out.strip().rsplit(": ", maxsplit=1)[-1]
+
+    response = await async_client.post(
+        _RESET_CONFIRM_URL,
+        json={"token": raw_token, "new_password": _RESET_STRONG_PASSWORD},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"message": "Password reset successful"}
+
+
+@pytest.mark.asyncio
+async def test_reset_confirm_invalid_token_returns_400(
+    async_client: AsyncClient,
+) -> None:
+    """POST /reset/confirm with a bogus token returns HTTP 400.
+
+    The service raises HTTPException 400 when the token hash does not match
+    any user record.  The router must let it propagate unchanged.
+    """
+    response = await async_client.post(
+        _RESET_CONFIRM_URL,
+        json={
+            "token": "totally-bogus-token-that-does-not-exist",
+            "new_password": _RESET_STRONG_PASSWORD,
+        },
+    )
+
+    assert response.status_code == 400
+    assert "invalid or expired" in response.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_reset_confirm_expired_token_returns_400(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    fake_redis,
+) -> None:
+    """POST /reset/confirm with an expired token returns HTTP 400.
+
+    Manually sets password_reset_sent_at to 31 minutes ago (beyond the
+    TTL defined in settings.password_reset_token_ttl_minutes = 30) and
+    confirms the endpoint returns 400.
+    """
+    email = f"reset_http_expired_{uuid.uuid4().hex[:8]}@example.com"
+    user, _ = await make_orm_user(db_session, fake_redis, email)
+
+    raw_token = generate_refresh_token()
+    user.password_reset_token_hash = hash_token(raw_token)
+    user.password_reset_sent_at = datetime.now(timezone.utc) - timedelta(minutes=31)
+    await db_session.commit()
+
+    response = await async_client.post(
+        _RESET_CONFIRM_URL,
+        json={"token": raw_token, "new_password": _RESET_STRONG_PASSWORD},
+    )
+
+    assert response.status_code == 400
+    assert "invalid or expired" in response.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_reset_confirm_weak_password_returns_422(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    fake_redis,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """POST /reset/confirm with a valid token but weak new_password returns 422.
+
+    SR-01 strength policy is enforced by the service before any state
+    mutation.  The router must propagate the 422 unchanged.
+    """
+    email = f"reset_http_weak_{uuid.uuid4().hex[:8]}@example.com"
+    await make_orm_user(db_session, fake_redis, email)
+
+    await request_password_reset(email=email, db=db_session, settings=_TEST_SETTINGS)
+    captured = capsys.readouterr()
+    raw_token = captured.out.strip().rsplit(": ", maxsplit=1)[-1]
+
+    response = await async_client.post(
+        _RESET_CONFIRM_URL,
+        json={"token": raw_token, "new_password": "weak"},
+    )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_reset_confirm_revokes_sessions(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    fake_redis,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """T-18: after POST /reset/confirm, an existing refresh token is rejected.
+
+    Creates a full login session (refresh token in DB, session in Redis), then
+    completes a password reset via the HTTP endpoint.  A subsequent POST to
+    /auth/refresh with the pre-reset refresh token must return 401, proving
+    that all sessions were revoked (SR-07, SR-10).
+    """
+    import uuid as _uuid
+
+    email = f"reset_http_revoke_{uuid.uuid4().hex[:8]}@example.com"
+    user, _ = await make_orm_user(db_session, fake_redis, email)
+
+    # Create a refresh token row and a Redis session for the user, simulating
+    # an active login session that must be wiped after the password reset.
+    raw_refresh = generate_refresh_token()
+    session_id = str(_uuid.uuid4())
+    rt_row = RefreshToken(
+        user_id=user.id,
+        token_hash=hash_token(raw_refresh),
+        session_id=_uuid.UUID(session_id),
+        expires_at=datetime.now(timezone.utc) + timedelta(days=7),
+    )
+    db_session.add(rt_row)
+    await db_session.commit()
+    await fake_redis.set(f"session:{session_id}", str(user.id))
+
+    # Obtain the raw reset token via the service layer.
+    await request_password_reset(email=email, db=db_session, settings=_TEST_SETTINGS)
+    captured = capsys.readouterr()
+    raw_token = captured.out.strip().rsplit(": ", maxsplit=1)[-1]
+
+    # Complete the reset via the HTTP endpoint.
+    confirm_resp = await async_client.post(
+        _RESET_CONFIRM_URL,
+        json={"token": raw_token, "new_password": _RESET_STRONG_PASSWORD},
+    )
+    assert confirm_resp.status_code == 200
+
+    # Attempt to refresh using the pre-reset refresh token.  Must be rejected
+    # because confirm_password_reset bulk-deletes all RefreshToken rows (SR-07).
+    refresh_resp = await async_client.post(
+        _REFRESH_URL,
+        json={"refresh_token": raw_refresh},
+    )
+    assert (
+        refresh_resp.status_code == 401
+    ), "Refresh token issued before password reset must be rejected after reset (T-18)"
+
+
+@pytest.mark.asyncio
+async def test_reset_confirm_audit_log_written(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    fake_redis,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """After POST /reset/confirm, a PASSWORD_RESET_COMPLETED audit log exists.
+
+    SR-16: every sensitive operation must produce an audit trail.  This test
+    confirms the HTTP endpoint path results in the audit entry being committed.
+    ADR-18: queries filter by both action and user_id.
+    """
+    email = f"reset_http_audit_{uuid.uuid4().hex[:8]}@example.com"
+    user, _ = await make_orm_user(db_session, fake_redis, email)
+
+    await request_password_reset(email=email, db=db_session, settings=_TEST_SETTINGS)
+    captured = capsys.readouterr()
+    raw_token = captured.out.strip().rsplit(": ", maxsplit=1)[-1]
+
+    response = await async_client.post(
+        _RESET_CONFIRM_URL,
+        json={"token": raw_token, "new_password": _RESET_STRONG_PASSWORD},
+    )
+    assert response.status_code == 200
+
+    # The PASSWORD_RESET_COMPLETED audit log entry must exist for this user.
+    audit_result = await db_session.execute(
+        select(AuditLog).where(
+            AuditLog.action == "PASSWORD_RESET_COMPLETED",
+            AuditLog.user_id == user.id,
+        )
+    )
+    entry = audit_result.scalar_one_or_none()
+    assert entry is not None, "Expected a PASSWORD_RESET_COMPLETED audit log entry"
+    assert entry.details is not None
+    assert entry.details.get("email") == email
