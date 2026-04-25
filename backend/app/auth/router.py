@@ -1,36 +1,37 @@
 """Authentication router — registration, verification, login, refresh, logout, and MFA.
 
 Exposes:
-- POST /auth/register          -- create a new user account (SR-01, SR-02, SR-03)
-- GET  /auth/verify-email      -- consume the email verification token (SR-03)
-- POST /auth/login             -- authenticate and receive JWT + refresh token
-                                  (SR-02, SR-05, SR-06, SR-07, SR-10, SR-16)
-- POST /auth/refresh           -- rotate refresh token and issue new access token
-                                  (SR-07, SR-08, SR-10, SR-16)
-- POST /auth/logout            -- terminate session, revoke tokens
-                                  (SR-09, SR-10, SR-16)
-- POST /auth/mfa/setup         -- initiate TOTP enrollment, return secret + QR code
-                                  (SR-04, SR-16)
-- POST /auth/mfa/enable        -- confirm TOTP code and activate the MFA gate
-                                  (SR-04, SR-16)
-- POST /auth/mfa/disable       -- deactivate the MFA gate after verifying password +
-                                  TOTP
-                                  (SR-04, SR-16)
-- POST /auth/password/change   -- change the authenticated user's password
-                                  (SR-01, SR-02, SR-16; ADR-21)
-- POST /auth/step-up           -- verify TOTP and issue a short-lived step-up JWT
-                                  for sensitive operations (SR-13, SR-14, SR-16)
+- POST /auth/register                 -- create a new user account (SR-01, SR-02, SR-03)
+- GET  /auth/verify-email             -- consume the email verification token (SR-03)
+- POST /auth/login                    -- authenticate and receive JWT + refresh token
+                                         (SR-02, SR-05, SR-06, SR-07, SR-10, SR-16)
+- POST /auth/refresh                  -- rotate refresh token and issue new access token
+                                         (SR-07, SR-08, SR-10, SR-16)
+- POST /auth/logout                   -- terminate session, revoke tokens
+                                         (SR-09, SR-10, SR-16)
+- POST /auth/mfa/setup                -- initiate TOTP enrollment, return secret + QR
+                                         code (SR-04, SR-16)
+- POST /auth/mfa/enable               -- confirm TOTP code and activate the MFA gate
+                                         (SR-04, SR-16)
+- POST /auth/mfa/disable              -- deactivate the MFA gate after verifying
+                                         password + TOTP (SR-04, SR-16)
+- POST /auth/password/change          -- change the authenticated user's password
+                                         (SR-01, SR-02, SR-16; ADR-21)
+- POST /auth/step-up                  -- verify TOTP and issue a short-lived step-up JWT
+                                         for sensitive operations (SR-13, SR-14, SR-16)
+- POST /auth/password/reset/request   -- issue a one-time password reset token (SR-18)
+- POST /auth/password/reset/confirm   -- verify reset token and set new password
+                                         (SR-01, SR-02, SR-07, SR-10, SR-18)
 
 Route handlers are intentionally thin: they extract HTTP inputs, delegate all
 business logic to ``auth.service``, and format the response.  No security
 decisions are made here.
 
-Security note: /register, /verify-email, /login, and /refresh are unauthenticated
-by design -- /refresh accepts an expired access token intentionally, so it cannot
-require a valid Bearer credential.  /logout, /mfa/setup, /mfa/enable, /mfa/disable,
-/password/change, and /step-up require a valid Bearer token via ``get_current_user``.
-/step-up additionally requires ``require_verified``.  Rate limiting is enforced at
-the Nginx layer (SR-15).
+Security note: /register, /verify-email, /login, /refresh, /password/reset/request,
+and /password/reset/confirm are unauthenticated by design.  /logout, /mfa/setup,
+/mfa/enable, /mfa/disable, /password/change, and /step-up require a valid Bearer
+token via ``get_current_user``.  /step-up additionally requires ``require_verified``.
+Rate limiting is enforced at the Nginx layer (SR-15).
 """
 
 from __future__ import annotations
@@ -43,9 +44,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.service import (
     change_password,
+    confirm_password_reset,
     disable_mfa,
     enable_mfa,
     register_user,
+    request_password_reset,
     setup_mfa,
     verify_email,
     verify_step_up,
@@ -67,6 +70,8 @@ from app.schemas.auth import (
     MFARequiredResponse,
     MFASetupResponse,
     PasswordChangeRequest,
+    PasswordResetConfirmRequest,
+    PasswordResetRequest,
     RefreshRequest,
     StepUpRequest,
     StepUpResponse,
@@ -585,3 +590,90 @@ async def step_up(
         step_up_token=token,
         expires_in=settings.step_up_token_expire_minutes * 60,
     )
+
+
+@router.post(
+    "/password/reset/request",
+    status_code=status.HTTP_200_OK,
+    summary="Request a password reset link",
+)
+async def password_reset_request(
+    body: PasswordResetRequest,
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, str]:
+    """Issue a one-time password reset token for the given email address.
+
+    This endpoint is intentionally unauthenticated: users who cannot log in
+    (because they have forgotten their password) must be able to reach it.
+
+    Enforces SR-18 non-enumeration: the response is always HTTP 200 with the
+    same message body regardless of whether the email exists in the database.
+    An attacker cannot distinguish a known account from an unknown one by
+    observing the response.
+
+    The raw reset token is delivered out-of-band (printed to stdout in demo
+    mode; sent via SMTP in production).  The token is never included in the
+    HTTP response body.
+
+    Args:
+        body:     Validated ``PasswordResetRequest`` containing the email address.
+        db:       Injected async database session.
+        settings: Injected application settings.
+
+    Returns:
+        A fixed success message dict with HTTP 200 regardless of email existence.
+    """
+    await request_password_reset(email=body.email, db=db, settings=settings)
+    # SR-18: identical response for both known and unknown email addresses.
+    return {"message": "If that email is registered, a reset link has been sent"}
+
+
+@router.post(
+    "/password/reset/confirm",
+    status_code=status.HTTP_200_OK,
+    summary="Verify a password reset token and set a new password",
+)
+async def password_reset_confirm(
+    body: PasswordResetConfirmRequest,
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),  # type: ignore[type-arg]
+    settings: Settings = Depends(get_settings),
+) -> dict[str, str]:
+    """Verify a one-time password reset token and update the account password.
+
+    This endpoint is intentionally unauthenticated: users who cannot log in
+    must be able to complete the reset flow without a Bearer token.
+
+    On success, the service (SR-18):
+    - Sets the new password as an Argon2id hash (SR-01, SR-02).
+    - Clears the reset token fields so the token cannot be reused.
+    - Bulk-deletes all RefreshToken rows for the user (SR-07).
+    - Revokes all active Redis sessions for the user (SR-10).
+    - Writes a PASSWORD_RESET_COMPLETED audit log entry (SR-16).
+
+    On failure the service raises an HTTPException which propagates directly:
+    - HTTP 400: token not found or expired (SR-18).
+    - HTTP 422: new password fails the SR-01 strength policy.
+
+    Args:
+        body:     Validated ``PasswordResetConfirmRequest`` (token + new_password).
+        db:       Injected async database session.
+        redis:    Injected Redis client for session revocation (SR-10).
+        settings: Injected application settings (token TTL, password policy).
+
+    Returns:
+        A success message dict with HTTP 200.
+
+    Raises:
+        HTTPException 400: Invalid or expired reset token.
+        HTTPException 422: New password fails the SR-01 strength policy.
+    """
+    await confirm_password_reset(
+        token=body.token,
+        new_password=body.new_password,
+        db=db,
+        redis=redis,
+        settings=settings,
+    )
+    return {"message": "Password reset successful"}
