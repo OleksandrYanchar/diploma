@@ -129,6 +129,31 @@ class User(Base):
         default=None,
     )
 
+    # SHA-256 hash of the one-time password reset token (SR-18).
+    # Raw token is logged to console in demo mode; only the hash is stored.
+    # Cleared (set to None) after successful reset.
+    password_reset_token_hash: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        default=None,
+    )
+
+    # Timestamp when the password reset token was issued (SR-18).
+    # Used to enforce the 30-minute expiry window.
+    password_reset_sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+
+    # Timestamp when the verification email was last sent (SR-03).
+    # Deferred from Phase 2 per ADR-15; used to rate-limit re-send requests.
+    email_verification_sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+
     # Audit timestamps.
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
