@@ -28,8 +28,8 @@ Security properties enforced:
 - SR-14: Step-up token stored as a one-time-use marker in Redis under
   ``step_up:{jti}``; consumed by ``require_step_up`` on first use.
 - SR-16: Audit log entries created for REGISTER, EMAIL_VERIFIED, LOGIN_SUCCESS,
-  LOGIN_FAILED, LOGOUT, TOKEN_REFRESHED, MFA_SETUP_INITIATED, MFA_ENABLED,
-  MFA_FAILED, LOGIN_MFA_REQUIRED, MFA_VERIFIED, STEP_UP_VERIFIED,
+  LOGIN_FAILED, ACCOUNT_LOCKED, LOGOUT, TOKEN_REFRESHED, MFA_SETUP_INITIATED,
+  MFA_ENABLED, MFA_FAILED, LOGIN_MFA_REQUIRED, MFA_VERIFIED, STEP_UP_VERIFIED,
   STEP_UP_FAILED, PASSWORD_RESET_REQUESTED, and PASSWORD_RESET_COMPLETED events.
 - SR-18: Password reset tokens stored as SHA-256 hash only; raw token delivered
   out-of-band (console in demo mode).  All sessions and refresh tokens are
@@ -340,6 +340,21 @@ async def login(
                     ip_address=None,
                     details={
                         "failed_login_count": settings.max_failed_login_attempts,
+                        "locked_until": user.locked_until.isoformat()
+                        if user.locked_until
+                        else None,
+                    },
+                )
+            )
+            # SR-16: AuditLog entry for the lockout event (human-readable trail).
+            # The SecurityEvent above serves automated monitoring; this entry
+            # ensures the lockout appears in audit log queries as well.
+            db.add(
+                AuditLog(
+                    user_id=user.id,
+                    action="ACCOUNT_LOCKED",
+                    ip_address=None,
+                    details={
                         "locked_until": user.locked_until.isoformat()
                         if user.locked_until
                         else None,
