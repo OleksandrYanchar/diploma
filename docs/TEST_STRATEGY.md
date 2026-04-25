@@ -491,7 +491,9 @@ backend/tests/
 ├── test_rbac.py             # Category E: role-based access control
 ├── test_ownership.py        # Category F: resource ownership enforcement
 ├── test_rate_limiting.py    # Category H: rate limiting, account lockout
-├── test_step_up_auth.py     # Category G: step-up authentication for transfers
+├── test_step_up.py          # Category G (issuance): POST /auth/step-up token issuance
+├── test_require_step_up.py  # Category G (dependency): require_step_up gate
+├── test_transfers.py        # Category G (integration): transfer + step-up threshold gate
 ├── test_audit_log.py        # Category I: audit log creation verification
 ├── test_security_events.py  # Category J: security event creation verification
 └── test_input_validation.py # Category K: input validation and schema enforcement
@@ -504,7 +506,7 @@ backend/tests/
 pytest tests/ -v
 
 # Run a specific category
-pytest tests/test_step_up_auth.py -v
+pytest tests/test_transfers.py tests/test_step_up.py -v
 
 # Run only MVP-critical tests (tagged)
 pytest tests/ -m "mvp_critical" -v
