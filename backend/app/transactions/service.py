@@ -37,6 +37,7 @@ from app.core.config import Settings
 from app.core.security import decode_step_up_token
 from app.models.account import Account, AccountStatus
 from app.models.audit_log import AuditLog
+from app.models.security_event import SecurityEvent, Severity
 from app.models.transaction import Transaction, TransactionStatus, TransactionType
 from app.models.user import User
 from app.schemas.transaction import (
@@ -144,6 +145,23 @@ async def _validate_step_up_token(
                 "current_user_id": str(current_user.id),
             },
         )
+        # SR-17: Write a HIGH-severity SecurityEvent for the subject-mismatch
+        # bypass attempt.  The audit log records the action for the audit trail;
+        # this SecurityEvent surfaces it to automated anomaly detection systems
+        # that monitor the security_events table rather than the full audit log.
+        db.add(
+            SecurityEvent(
+                user_id=current_user.id,
+                event_type="STEP_UP_BYPASS_ATTEMPT",
+                severity=Severity.HIGH,
+                ip_address=None,
+                details={
+                    "reason": "subject_mismatch",
+                    "token_sub": sub,
+                },
+            )
+        )
+        await db.commit()
         raise HTTPException(
             status_code=403,
             detail="Step-up token subject mismatch",

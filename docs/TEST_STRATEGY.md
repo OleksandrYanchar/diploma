@@ -308,14 +308,13 @@ are listed as "Phase N — not yet implemented".
 | T-14 | `test_transfer_above_threshold_consumed_step_up` | `test_transfers.py` | Implemented |
 | T-15 | — | — | Phase 7 — not yet implemented |
 | T-16 | `test_login_audit_log_written_on_success` | `test_auth_login.py` | Implemented |
-| T-17 | — | — | Phase 6 — not yet implemented |
-| T-18 | — | — | Phase 6 — not yet implemented |
+| T-17 | `test_reset_request_nonexistent_email_returns_200` | `test_auth_password.py` | Implemented |
+| T-18 | `test_reset_confirm_revokes_sessions` | `test_auth_password.py` | Implemented |
 | T-19 | `test_register_weak_password_returns_422` | `test_auth_register.py` | Implemented |
-| T-20 | — | — | Phase 6 — not yet implemented |
+| T-20 | `test_token_reuse_creates_critical_security_event` | `test_security_events.py` | Implemented |
 
-**16 of 20** MVP-critical tests are implemented as of the end of Phase 5.
-The remaining four (T-15, T-17, T-18, T-20) are scheduled for Phase 6
-(password reset + security events) and Phase 7 (rate limiting).
+**19 of 20** MVP-critical tests are implemented as of the end of Phase 6.
+The remaining one (T-15) is scheduled for Phase 7 (rate limiting).
 
 ---
 
@@ -491,7 +490,9 @@ backend/tests/
 ├── test_rbac.py             # Category E: role-based access control
 ├── test_ownership.py        # Category F: resource ownership enforcement
 ├── test_rate_limiting.py    # Category H: rate limiting, account lockout
-├── test_step_up_auth.py     # Category G: step-up authentication for transfers
+├── test_step_up.py          # Category G (issuance): POST /auth/step-up token issuance
+├── test_require_step_up.py  # Category G (dependency): require_step_up gate
+├── test_transfers.py        # Category G (integration): transfer + step-up threshold gate
 ├── test_audit_log.py        # Category I: audit log creation verification
 ├── test_security_events.py  # Category J: security event creation verification
 └── test_input_validation.py # Category K: input validation and schema enforcement
@@ -504,7 +505,7 @@ backend/tests/
 pytest tests/ -v
 
 # Run a specific category
-pytest tests/test_step_up_auth.py -v
+pytest tests/test_transfers.py tests/test_step_up.py -v
 
 # Run only MVP-critical tests (tagged)
 pytest tests/ -m "mvp_critical" -v

@@ -205,6 +205,17 @@ class Settings(BaseSettings):
         ),
     )
 
+    # SR-18: password reset token lifetime
+    password_reset_token_ttl_minutes: int = Field(
+        default=30,
+        ge=1,
+        le=60,
+        description=(
+            "Password reset token lifetime in minutes. "
+            "Tokens presented after this window are rejected (SR-18)."
+        ),
+    )
+
     # SR-13: step-up authentication threshold (in USD cents or base currency units)
     step_up_transfer_threshold: int = Field(
         default=100000,  # 1000.00 USD stored as integer cents
