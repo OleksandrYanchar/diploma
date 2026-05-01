@@ -13,14 +13,15 @@ Security properties enforced:
   one-time-use marker.  ``require_step_up`` atomically consumes the marker via
   ``getdel``; any subsequent presentation of the same token finds the Redis key
   absent and is rejected with 403.
-- SR-16: A ``STEP_UP_BYPASS_ATTEMPT`` audit log entry is committed before
-  raising on any subject-mismatch attempt, ensuring the event is always
-  persisted regardless of exception handling above this call site.
+- SR-16: A ``STEP_UP_BYPASS_ATTEMPT`` audit log entry and a HIGH-severity
+  ``SecurityEvent`` row are both committed before raising on any
+  subject-mismatch attempt, ensuring the events are always persisted
+  regardless of exception handling above this call site.
 """
 
 from __future__ import annotations
 
-from fastapi import Depends, Header, HTTPException
+from fastapi import Depends, Header, HTTPException, Request
 from jwt import InvalidTokenError
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,10 +32,12 @@ from app.core.redis import get_redis
 from app.core.security import decode_step_up_token
 from app.dependencies.auth import get_current_user
 from app.models.audit_log import AuditLog
+from app.models.security_event import SecurityEvent, Severity
 from app.models.user import User
 
 
 async def require_step_up(
+    request: Request,
     x_step_up_token: str | None = Header(default=None, alias="X-Step-Up-Token"),
     current_user: User = Depends(get_current_user),
     redis: Redis = Depends(get_redis),  # type: ignore[type-arg]
@@ -86,6 +89,10 @@ async def require_step_up(
         ) -> ...:
 
     Args:
+        request:         FastAPI ``Request`` object.  FastAPI injects it
+                         automatically without ``Depends()``.  Used to extract
+                         the client IP (``X-Real-IP`` header) and user agent
+                         (``User-Agent`` header) for audit log capture (SR-16).
         x_step_up_token: Raw JWT from the ``X-Step-Up-Token`` request header.
                          FastAPI injects ``None`` when the header is absent.
         current_user:    The authenticated User provided by ``get_current_user``.
@@ -93,8 +100,8 @@ async def require_step_up(
                          checks before this dependency is evaluated.
         redis:           Injected async Redis client (used for ``getdel``).
         settings:        Injected application settings (signing key, algorithm).
-        db:              Injected async database session (used for audit log on
-                         subject mismatch).
+        db:              Injected async database session (used for audit log and
+                         security event on subject mismatch).
 
     Returns:
         None (used solely for its side effect).
@@ -140,20 +147,41 @@ async def require_step_up(
     # Step 4: Subject binding check.
     # The step-up token sub must match the bearer token sub (current_user).
     # A mismatch indicates an attempt to use another user's step-up token.
-    # Commit the audit entry BEFORE raising so the event is always
-    # persisted regardless of exception handling above this call site
-    # (SR-16) — matching the pattern used for STEP_UP_FAILED and MFA_FAILED.
+    # Commit the audit entry AND a HIGH-severity SecurityEvent BEFORE raising
+    # so both events are always persisted regardless of exception handling
+    # above this call site (SR-16) — matching the pattern used in
+    # _validate_step_up_token in transactions/service.py.
     # ------------------------------------------------------------------
     if sub != str(current_user.id):
+        ip_address: str | None = request.headers.get("X-Real-IP") or (
+            request.client.host if request.client else None
+        )
+        user_agent: str | None = request.headers.get("User-Agent")
         db.add(
             AuditLog(
                 user_id=current_user.id,
                 action="STEP_UP_BYPASS_ATTEMPT",
-                ip_address=None,
+                ip_address=ip_address,
+                user_agent=user_agent,
                 details={
                     "reason": "subject_mismatch",
                     "token_sub": sub,
                     "current_user_id": str(current_user.id),
+                },
+            )
+        )
+        # SR-17: Write a HIGH-severity SecurityEvent so automated anomaly
+        # detection systems that monitor security_events (rather than the full
+        # audit log) surface this bypass attempt immediately.
+        db.add(
+            SecurityEvent(
+                user_id=current_user.id,
+                event_type="STEP_UP_BYPASS_ATTEMPT",
+                severity=Severity.HIGH,
+                ip_address=ip_address,
+                details={
+                    "reason": "subject_mismatch",
+                    "token_sub": sub,
                 },
             )
         )
