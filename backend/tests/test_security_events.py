@@ -374,3 +374,106 @@ async def test_step_up_bypass_attempt_creates_security_event(
     assert audit_entry.details is not None
     assert audit_entry.details.get("reason") == "subject_mismatch"
     assert audit_entry.details.get("token_sub") == str(user_a.id)
+
+
+# ---------------------------------------------------------------------------
+# Event 4: STEP_UP_BYPASS_ATTEMPT via require_step_up dependency (severity=HIGH)
+# ---------------------------------------------------------------------------
+
+# The test route /api/v1/test/step-up-check is registered by test_require_step_up
+# at module import time.  pytest collects that module before running tests in this
+# module, so the route is present in the app when these tests execute.
+_STEP_UP_CHECK_URL = "/api/v1/test/step-up-check"
+
+
+@pytest.mark.asyncio
+async def test_step_up_bypass_via_dependency_writes_security_event(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    fake_redis: object,
+) -> None:
+    """Subject-mismatch in require_step_up writes a HIGH-severity SecurityEvent.
+
+    This test exercises the ``require_step_up`` FastAPI dependency (not the
+    ``_validate_step_up_token`` helper in transactions/service.py).  It verifies
+    that Item 2 of the Phase 6 audit was correctly applied: both an AuditLog row
+    and a SecurityEvent row are committed when the step-up token's ``sub`` claim
+    does not match the authenticated user (SR-13, SR-17).
+
+    Setup:
+    - User A: step-up token is issued for this user and seeded in Redis.
+    - User B: makes the protected request using user A's step-up token.
+
+    Expected outcome: 403 (subject mismatch), SecurityEvent row for user B, and
+    a regression-guard AuditLog row for user B.
+    """
+    import tests.test_require_step_up  # noqa: F401 — registers the test route
+
+    # User A — the step-up token is issued for this user.
+    user_a, _token_a = await make_orm_user(
+        db_session,
+        fake_redis,
+        email=f"dep_bypass_se_a_{uuid.uuid4().hex[:8]}@example.com",
+    )
+    step_up_token_for_a, jti_a = create_step_up_token(
+        subject=str(user_a.id),
+        settings=_TEST_SETTINGS,
+    )
+    await fake_redis.set(f"step_up:{jti_a}", str(user_a.id), ex=300)  # type: ignore[union-attr]
+
+    # User B — authenticated caller who presents user A's step-up token.
+    user_b, token_b = await make_orm_user(
+        db_session,
+        fake_redis,
+        email=f"dep_bypass_se_b_{uuid.uuid4().hex[:8]}@example.com",
+        session_id=f"00000000-0000-0000-6666-{uuid.uuid4().hex[:12]}",
+    )
+
+    # Hit the test-only protected endpoint with user B's bearer token but
+    # user A's step-up token.  require_step_up must detect the mismatch.
+    response = await async_client.get(
+        _STEP_UP_CHECK_URL,
+        headers={
+            "Authorization": f"Bearer {token_b}",
+            "X-Step-Up-Token": step_up_token_for_a,
+        },
+    )
+    assert (
+        response.status_code == 403
+    ), "Subject-mismatch in require_step_up must return 403"
+    assert "mismatch" in response.json()["detail"].lower()
+
+    # SecurityEvent row must be present for user B (Item 2 — require_step_up).
+    se_result = await db_session.execute(
+        select(SecurityEvent).where(
+            SecurityEvent.event_type == "STEP_UP_BYPASS_ATTEMPT",
+            SecurityEvent.user_id == user_b.id,
+        )
+    )
+    event = se_result.scalar_one_or_none()
+    assert event is not None, (
+        "require_step_up subject-mismatch must write a SecurityEvent row "
+        "(SR-17; Item 2 of Phase 6 audit)"
+    )
+    assert (
+        event.severity == Severity.HIGH
+    ), f"STEP_UP_BYPASS_ATTEMPT event must have severity=HIGH, got {event.severity}"
+    assert event.user_id == user_b.id
+    assert event.details is not None
+    assert event.details.get("reason") == "subject_mismatch"
+    assert event.details.get("token_sub") == str(user_a.id)
+
+    # Regression guard: AuditLog row must also exist (SR-16).
+    audit_result = await db_session.execute(
+        select(AuditLog).where(
+            AuditLog.action == "STEP_UP_BYPASS_ATTEMPT",
+            AuditLog.user_id == user_b.id,
+        )
+    )
+    audit_entry = audit_result.scalar_one_or_none()
+    assert (
+        audit_entry is not None
+    ), "require_step_up subject-mismatch must also write an AuditLog row (SR-16)"
+    assert audit_entry.details is not None
+    assert audit_entry.details.get("reason") == "subject_mismatch"
+    assert audit_entry.details.get("token_sub") == str(user_a.id)

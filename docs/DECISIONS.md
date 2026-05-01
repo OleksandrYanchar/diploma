@@ -441,7 +441,13 @@ The TOTP secret is stored in `users.mfa_secret` as a raw Base32 string.  Two enc
 
 **Residual risk:** An attacker holding a stolen session token (access token + matching Redis session) survives a password change by the legitimate user.  The correct remediation available today is explicit logout (SR-09 / SR-10), which terminates the session immediately, or admin deactivation (already implemented).
 
-**Status:** Accepted (Phase 4 MVP); revisit in Phase 6.  Phase 6 must evaluate whether voluntary password change should also trigger session revocation at that time, alongside the password reset session revocation already specified.
+**Status:** Accepted and closed (Phase 6 evaluation complete).
+
+**Phase 6 evaluation outcome:** The Phase 6 password reset implementation (`POST /auth/password/reset/request` and `POST /auth/password/reset/confirm`) does revoke all active Redis sessions on reset completion, as specified by SR-18.  The Phase 6 evaluation reviewed whether the same behaviour should apply to voluntary in-session password change.
+
+**Decision confirmed:** `POST /auth/password/change` continues to NOT revoke active sessions.  The rationale from Phase 4 holds: the voluntary change is an in-session action by a verified user; the threat model differs from password reset where an external actor may have triggered the flow.  Implementing full session iteration for this path adds complexity without a proportionate security gain for the diploma scope.
+
+The regression test `test_password_change_does_not_revoke_sessions` (in `tests/test_auth_password.py`) guards this decision: it verifies that tokens issued before a password change remain valid afterwards.
 
 ---
 

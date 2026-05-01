@@ -195,7 +195,7 @@ Each requirement is numbered for traceability. Requirements are referenced from 
 
 | Field | Value |
 |-------|-------|
-| **Description** | All security-relevant actions must be recorded in an append-only audit log including: all authentication events, token lifecycle events, data access events, transfer events, and admin actions. Each log entry must capture user ID, action, status (success/failure), IP address, user agent, timestamp, and structured details. |
+| **Description** | All security-relevant actions must be recorded in an append-only audit log including: all authentication events, token lifecycle events, data access events, transfer events, and admin actions. Each log entry must capture user ID, action, status (success/failure), IP address, user agent, timestamp, and structured details. The IP address is extracted from the ``X-Real-IP`` header forwarded by the Nginx reverse proxy; the user agent is taken from the ``User-Agent`` header. Both values are extracted at the router layer and passed as plain string parameters to the service layer — no ``Request`` object crosses the router/service boundary. |
 | **Rationale** | Non-repudiation requires an authoritative record of who did what, when, and from where. Audit logs are essential for incident response and regulatory compliance. |
 | **Zero Trust principle** | Assume breach — every action is recorded so that breaches can be reconstructed and attributed. |
 | **Priority** | P1 |

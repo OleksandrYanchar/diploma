@@ -32,8 +32,12 @@ class TransferRequest(BaseModel):
     """
 
     to_account_number: str = Field(
+        min_length=16,
+        max_length=16,
         description=(
             "Public account number of the destination account. "
+            "Account numbers are 16-character uppercase hex strings "
+            "(generated as ``secrets.token_hex(8).upper()``). "
             "The service resolves this to an internal account and rejects "
             "transfers to INACTIVE or FROZEN accounts (T-02)."
         ),

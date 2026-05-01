@@ -28,13 +28,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings
 from app.core.security import create_access_token, hash_password
 from app.models.user import User, UserRole
+from tests.conftest import (
+    _UNVERIFIED_SESSION_ID,
+    _VERIFIED_SESSION_ID,
+)
 
-# The fixture session ID used by all Phase 4 fixtures in conftest.py.
-_FIXTURE_SESSION_ID = "00000000-0000-0000-0000-000000000001"
+# Aliases matching the per-role session IDs now defined in conftest.
+_FIXTURE_SESSION_ID = _VERIFIED_SESSION_ID
 
-# A second session ID for tests that create additional users inline, distinct
-# from the fixture session ID so both sessions coexist in FakeRedis.
-_SECOND_SESSION_ID = "00000000-0000-0000-0000-000000000002"
+# A session ID for tests that create additional users inline, distinct from
+# all fixture session IDs so sessions coexist in FakeRedis without collision.
+_SECOND_SESSION_ID = "00000000-0000-0000-0000-000000000010"
 
 # Test settings shared by inline token issuance, matching the overrides in
 # conftest.py so that tokens issued here are accepted by get_current_user.
@@ -138,7 +142,8 @@ async def test_get_me_unverified_user_returns_200(
     """
     user, token = unverified_user
 
-    await fake_redis.set(f"session:{_FIXTURE_SESSION_ID}", str(user.id))
+    # The unverified_user fixture embeds _UNVERIFIED_SESSION_ID in its token.
+    await fake_redis.set(f"session:{_UNVERIFIED_SESSION_ID}", str(user.id))
 
     response = await async_client.get(
         "/api/v1/users/me",

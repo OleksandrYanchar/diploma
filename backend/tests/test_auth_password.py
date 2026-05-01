@@ -1002,3 +1002,47 @@ async def test_reset_confirm_audit_log_written(
     assert entry is not None, "Expected a PASSWORD_RESET_COMPLETED audit log entry"
     assert entry.details is not None
     assert entry.details.get("email") == email
+
+
+@pytest.mark.asyncio
+async def test_password_reset_token_is_single_use(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    fake_redis,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A password reset token can only be used once.
+
+    SR-18: the reset token hash is cleared on successful use.  A second call
+    with the same token must return 400 (invalid or already-used token) rather
+    than resetting the password a second time.
+
+    Regression guard: if confirm_password_reset failed to clear the hash, an
+    attacker who intercepts the reset link could reset the password again after
+    the legitimate user has already completed the flow.
+    """
+    email = f"reset_single_use_{uuid.uuid4().hex[:8]}@example.com"
+    await make_orm_user(db_session, fake_redis, email)
+
+    # Request a reset token (DEMO MODE prints it to stdout).
+    await request_password_reset(email=email, db=db_session, settings=_TEST_SETTINGS)
+    captured = capsys.readouterr()
+    raw_token = captured.out.strip().rsplit(": ", maxsplit=1)[-1]
+
+    # First use — must succeed (HTTP 200).
+    first_response = await async_client.post(
+        _RESET_CONFIRM_URL,
+        json={"token": raw_token, "new_password": _RESET_STRONG_PASSWORD},
+    )
+    assert (
+        first_response.status_code == 200
+    ), "First use of a valid reset token must return 200"
+
+    # Second use of the same token — must be rejected (HTTP 400).
+    second_response = await async_client.post(
+        _RESET_CONFIRM_URL,
+        json={"token": raw_token, "new_password": "An0therStr0ng@Pass!"},
+    )
+    assert (
+        second_response.status_code == 400
+    ), "Reusing a password reset token after successful use must return 400 (SR-18)"
