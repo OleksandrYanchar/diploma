@@ -76,12 +76,20 @@ class Transaction(Base):
     )
 
     transaction_type: Mapped[TransactionType] = mapped_column(
-        Enum(TransactionType, name="transactiontype"),
+        Enum(
+            TransactionType,
+            name="transactiontype",
+            values_callable=lambda obj: [e.value for e in obj],
+        ),
         nullable=False,
     )
 
     status: Mapped[TransactionStatus] = mapped_column(
-        Enum(TransactionStatus, name="transactionstatus"),
+        Enum(
+            TransactionStatus,
+            name="transactionstatus",
+            values_callable=lambda obj: [e.value for e in obj],
+        ),
         nullable=False,
         default=TransactionStatus.PENDING,
     )
