@@ -313,6 +313,52 @@ async def test_transfer_below_threshold_no_step_up(
     assert dest_account.balance == Decimal("50.00")
 
 
+async def test_transfer_step_up_gate_fires_before_balance_check(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    fake_redis: object,
+) -> None:
+    """Step-up gate returns 403 even when the sender's balance is insufficient.
+
+    Security property (SR-13): the step-up check must precede the balance
+    check so that a missing step-up token is always reported as 403
+    (X-Step-Up-Required), never as 400 (Insufficient balance).  This prevents
+    leaking balance state to a caller who hasn't completed step-up auth.
+
+    Regression guard: prior to the fix, the service checked balance (step 7)
+    before the step-up gate (step 8).  A low-balance + missing-step-up request
+    would return 400 instead of 403, revealing account balance information.
+    """
+    sender, sender_token = await make_orm_user(
+        db_session,
+        fake_redis,
+        email=f"sender_lowbal_stepup_{uuid.uuid4()}@example.com",
+    )
+    recipient, _ = await make_orm_user(
+        db_session,
+        fake_redis,
+        email=f"recipient_lowbal_stepup_{uuid.uuid4()}@example.com",
+        session_id=f"00000000-0000-0000-5555-{uuid.uuid4().hex[:12]}",
+    )
+    # Sender balance ($50) is below the transfer amount ($1000),
+    # which is also at or above the step-up threshold.
+    await _make_account(db_session, sender.id, balance=Decimal("50.00"))
+    dest_account = await _make_account(db_session, recipient.id)
+
+    response = await async_client.post(
+        TRANSFER_URL,
+        json={
+            "to_account_number": dest_account.account_number,
+            "amount": "1000.00",  # at threshold; sender only has $50
+        },
+        headers={"Authorization": f"Bearer {sender_token}"},
+        # No X-Step-Up-Token header — step-up gate must fire first.
+    )
+    # Must be 403 (step-up required), not 400 (insufficient balance).
+    assert response.status_code == 403
+    assert response.headers.get("x-step-up-required") == "true"
+
+
 async def test_transfer_above_threshold_missing_step_up(
     async_client: AsyncClient,
     db_session: AsyncSession,

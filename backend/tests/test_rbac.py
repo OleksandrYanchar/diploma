@@ -27,13 +27,19 @@ from app.core.config import Settings
 from app.core.security import create_access_token, hash_password
 from app.dependencies.auth import require_role
 from app.models.user import User, UserRole
+from tests.conftest import (
+    _ADMIN_SESSION_ID,
+    _AUDITOR_SESSION_ID,
+    _VERIFIED_SESSION_ID,
+)
 
-# The fixture session ID used by all Phase 4 fixtures in conftest.py.
-_FIXTURE_SESSION_ID = "00000000-0000-0000-0000-000000000001"
+# Alias for the verified_user fixture session ID (kept for backward-compat
+# with tests that seed Redis manually for that role).
+_FIXTURE_SESSION_ID = _VERIFIED_SESSION_ID
 
-# A second session ID used when creating inline users in integration tests,
-# distinct from the fixture session ID so both sessions coexist in FakeRedis.
-_SECOND_SESSION_ID = "00000000-0000-0000-0000-000000000002"
+# A session ID used when creating inline users in integration tests, distinct
+# from all fixture session IDs so both sessions coexist in FakeRedis.
+_SECOND_SESSION_ID = "00000000-0000-0000-0000-000000000010"
 
 # Test settings matching the overrides installed by async_client in conftest.py
 # so that tokens issued inline here are accepted by get_current_user.
@@ -253,7 +259,8 @@ async def test_admin_ping_admin_role_returns_200(
     user, token = admin_user
 
     # Seed the Redis session required by get_current_user step 4 (SR-10).
-    await fake_redis.set(f"session:{_FIXTURE_SESSION_ID}", str(user.id))
+    # The admin_user fixture embeds _ADMIN_SESSION_ID in its access token.
+    await fake_redis.set(f"session:{_ADMIN_SESSION_ID}", str(user.id))
 
     response = await async_client.get(
         "/api/v1/admin/ping",
@@ -324,7 +331,8 @@ async def test_admin_ping_auditor_role_returns_403(
     """
     user, token = auditor_user
 
-    await fake_redis.set(f"session:{_FIXTURE_SESSION_ID}", str(user.id))
+    # The auditor_user fixture embeds _AUDITOR_SESSION_ID in its access token.
+    await fake_redis.set(f"session:{_AUDITOR_SESSION_ID}", str(user.id))
 
     response = await async_client.get(
         "/api/v1/admin/ping",

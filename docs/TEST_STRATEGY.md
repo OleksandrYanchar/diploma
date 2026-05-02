@@ -308,14 +308,13 @@ are listed as "Phase N — not yet implemented".
 | T-14 | `test_transfer_above_threshold_consumed_step_up` | `test_transfers.py` | Implemented |
 | T-15 | — | — | Phase 7 — not yet implemented |
 | T-16 | `test_login_audit_log_written_on_success` | `test_auth_login.py` | Implemented |
-| T-17 | — | — | Phase 6 — not yet implemented |
-| T-18 | — | — | Phase 6 — not yet implemented |
+| T-17 | `test_reset_request_nonexistent_email_returns_200` | `test_auth_password.py` | Implemented |
+| T-18 | `test_reset_confirm_revokes_sessions` | `test_auth_password.py` | Implemented |
 | T-19 | `test_register_weak_password_returns_422` | `test_auth_register.py` | Implemented |
-| T-20 | — | — | Phase 6 — not yet implemented |
+| T-20 | `test_token_reuse_creates_critical_security_event` | `test_security_events.py` | Implemented |
 
-**16 of 20** MVP-critical tests are implemented as of the end of Phase 5.
-The remaining four (T-15, T-17, T-18, T-20) are scheduled for Phase 6
-(password reset + security events) and Phase 7 (rate limiting).
+**19 of 20** MVP-critical tests are implemented as of the end of Phase 6.
+The remaining one (T-15) is scheduled for Phase 7 (rate limiting).
 
 ---
 
@@ -359,7 +358,7 @@ Each implementation phase from `IMPLEMENTATION_PLAN.md` has a corresponding set 
 
 ### Phase 2 — Core Authentication
 
-**Verification method:** Integration tests in `tests/test_auth.py` and `tests/test_tokens.py`.
+**Verification method:** Integration tests in `tests/test_auth_register.py`, `tests/test_auth_login.py`, `tests/test_auth_refresh.py`, and `tests/test_auth_logout.py`.
 
 | Test | SR |
 |------|----|
@@ -377,7 +376,7 @@ Each implementation phase from `IMPLEMENTATION_PLAN.md` has a corresponding set 
 
 ### Phase 3 — MFA (TOTP)
 
-**Verification method:** Integration tests in `tests/test_auth.py` (MFA section).
+**Verification method:** Integration tests in `tests/test_auth_mfa.py`.
 
 | Test | SR |
 |------|----|
@@ -391,7 +390,7 @@ Each implementation phase from `IMPLEMENTATION_PLAN.md` has a corresponding set 
 
 ### Phase 4 — Authorization
 
-**Verification method:** Integration tests in `tests/test_rbac.py` and `tests/test_ownership.py`.
+**Verification method:** Integration tests in `tests/test_rbac.py`, `tests/test_accounts.py`, and `tests/test_transfers.py` (ownership and role enforcement).
 
 | Test | SR |
 |------|----|
@@ -485,16 +484,27 @@ The named role fixtures (`verified_user`, `admin_user`, `auditor_user`, `unverif
 
 ```
 backend/tests/
-├── conftest.py              # Shared fixtures: test_db, test_redis, client, verified_user, admin_user
-├── test_auth.py             # Category A, B, L: authentication, MFA, password reset
-├── test_tokens.py           # Category C, D: token lifecycle, session management
-├── test_rbac.py             # Category E: role-based access control
-├── test_ownership.py        # Category F: resource ownership enforcement
-├── test_rate_limiting.py    # Category H: rate limiting, account lockout
-├── test_step_up_auth.py     # Category G: step-up authentication for transfers
-├── test_audit_log.py        # Category I: audit log creation verification
-├── test_security_events.py  # Category J: security event creation verification
-└── test_input_validation.py # Category K: input validation and schema enforcement
+├── conftest.py                  # Shared fixtures: db_session, fake_redis, async_client, role fixtures
+├── helpers.py                   # make_orm_user helper for building ORM users in tests
+├── test_auth_login.py           # Category A: login flow, account lockout (T-01, T-02, T-16)
+├── test_auth_logout.py          # Category C: logout, access token blacklisting (T-07)
+├── test_auth_mfa.py             # Category B: MFA setup, enable, disable, login with TOTP (T-03, T-04)
+├── test_auth_password.py        # Category L: password change, reset request/confirm (T-17, T-18)
+├── test_auth_refresh.py         # Category D: refresh token rotation and reuse detection (T-05, T-06)
+├── test_auth_register.py        # Category A: registration, email verification (T-19)
+├── test_accounts.py             # GET /accounts/me: lazy account creation, auth gates
+├── test_get_current_user.py     # get_current_user dependency: all seven Zero Trust checks
+├── test_health.py               # GET /health: liveness probe
+├── test_rbac.py                 # Category E: role-based access control (T-08, T-09, T-10)
+├── test_require_step_up.py      # Category G (dependency): require_step_up gate (T-12, T-13)
+├── test_security.py             # Unit tests for app.core.security primitives
+├── test_security_events.py      # Category J: SecurityEvent rows for lockout, token reuse, bypass
+├── test_step_up.py              # Category G (issuance): POST /auth/step-up token issuance (T-11)
+├── test_totp.py                 # Unit tests for app.core.totp (secret gen, verify, QR export)
+├── test_transaction_history.py  # GET /transactions/history: pagination, auth gates (T-15)
+├── test_transfers.py            # Category G (integration): transfer + step-up threshold (T-14)
+├── test_users_me.py             # GET /users/me: profile fields, sensitive field exclusion
+└── test_e2e_auth_lifecycle.py   # End-to-end: register → verify → login → MFA → reset → logout
 ```
 
 ### Running tests
@@ -504,7 +514,7 @@ backend/tests/
 pytest tests/ -v
 
 # Run a specific category
-pytest tests/test_step_up_auth.py -v
+pytest tests/test_transfers.py tests/test_step_up.py -v
 
 # Run only MVP-critical tests (tagged)
 pytest tests/ -m "mvp_critical" -v

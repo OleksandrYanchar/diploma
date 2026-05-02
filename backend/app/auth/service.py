@@ -28,9 +28,13 @@ Security properties enforced:
 - SR-14: Step-up token stored as a one-time-use marker in Redis under
   ``step_up:{jti}``; consumed by ``require_step_up`` on first use.
 - SR-16: Audit log entries created for REGISTER, EMAIL_VERIFIED, LOGIN_SUCCESS,
-  LOGIN_FAILED, LOGOUT, TOKEN_REFRESHED, MFA_SETUP_INITIATED, MFA_ENABLED,
-  MFA_FAILED, LOGIN_MFA_REQUIRED, MFA_VERIFIED, STEP_UP_VERIFIED, and
-  STEP_UP_FAILED events.
+  LOGIN_FAILED, ACCOUNT_LOCKED, LOGOUT, TOKEN_REFRESHED, MFA_SETUP_INITIATED,
+  MFA_ENABLED, MFA_FAILED, LOGIN_MFA_REQUIRED, MFA_VERIFIED, STEP_UP_VERIFIED,
+  STEP_UP_FAILED, PASSWORD_RESET_REQUESTED, and PASSWORD_RESET_COMPLETED events.
+- SR-18: Password reset tokens stored as SHA-256 hash only; raw token delivered
+  out-of-band (console in demo mode).  All sessions and refresh tokens are
+  revoked on a successful password reset so that the account is fully
+  re-authenticated after the credential change.
 """
 
 from __future__ import annotations
@@ -40,7 +44,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException
 from redis.asyncio import Redis
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
@@ -60,6 +64,7 @@ from app.core.totp import (
 )
 from app.models.audit_log import AuditLog
 from app.models.refresh_token import RefreshToken
+from app.models.security_event import SecurityEvent, Severity
 from app.models.user import User, UserRole
 
 # ---------------------------------------------------------------------------
@@ -78,6 +83,8 @@ async def register_user(
     password: str,
     db: AsyncSession,
     settings: Settings,  # noqa: ARG001  (reserved for future SMTP / policy use)
+    ip_address: str | None = None,
+    user_agent: str | None = None,
 ) -> User:
     """Create a new user account and issue an email verification token.
 
@@ -91,11 +98,14 @@ async def register_user(
     replaced with an SMTP send.
 
     Args:
-        email:    The email address supplied by the registering user.
-        password: The plaintext password supplied by the registering user.
-        db:       An async SQLAlchemy session for the current request.
-        settings: Application settings (reserved for future use by SMTP
-                  dispatch and policy parameters).
+        email:      The email address supplied by the registering user.
+        password:   The plaintext password supplied by the registering user.
+        db:         An async SQLAlchemy session for the current request.
+        settings:   Application settings (reserved for future use by SMTP
+                    dispatch and policy parameters).
+        ip_address: Client IP address extracted from X-Real-IP header by the
+                    router layer (SR-16).
+        user_agent: Raw User-Agent header extracted by the router layer (SR-16).
 
     Returns:
         The newly created and committed ``User`` ORM object.
@@ -144,7 +154,8 @@ async def register_user(
     audit = AuditLog(
         user_id=user.id,
         action="REGISTER",
-        ip_address=None,
+        ip_address=ip_address,
+        user_agent=user_agent,
         details={"email": email},
     )
     db.add(audit)
@@ -160,7 +171,12 @@ async def register_user(
     return user
 
 
-async def verify_email(token: str, db: AsyncSession) -> None:
+async def verify_email(
+    token: str,
+    db: AsyncSession,
+    ip_address: str | None = None,
+    user_agent: str | None = None,
+) -> None:
     """Mark a user's email address as verified after token validation.
 
     Enforces SR-03 (email verification required before protected resource
@@ -172,9 +188,12 @@ async def verify_email(token: str, db: AsyncSession) -> None:
     immediately on success).
 
     Args:
-        token: The raw verification token received from the client query
-               parameter.
-        db:    An async SQLAlchemy session for the current request.
+        token:      The raw verification token received from the client query
+                    parameter.
+        db:         An async SQLAlchemy session for the current request.
+        ip_address: Client IP address extracted from X-Real-IP header by the
+                    router layer (SR-16).
+        user_agent: Raw User-Agent header extracted by the router layer (SR-16).
 
     Raises:
         HTTPException 400: If no unverified user matches the token hash, or if
@@ -205,7 +224,8 @@ async def verify_email(token: str, db: AsyncSession) -> None:
     audit = AuditLog(
         user_id=user.id,
         action="EMAIL_VERIFIED",
-        ip_address=None,
+        ip_address=ip_address,
+        user_agent=user_agent,
         details={"email": user.email},
     )
     db.add(audit)
@@ -220,6 +240,8 @@ async def login(
     redis: Redis,  # type: ignore[type-arg]
     settings: Settings,
     totp_code: str | None = None,
+    ip_address: str | None = None,
+    user_agent: str | None = None,
 ) -> tuple[str, str] | tuple[None, None]:
     """Authenticate a user and create a new session, issuing JWT + refresh token.
 
@@ -233,13 +255,16 @@ async def login(
     runs, making the response time independent of whether the email exists.
 
     Args:
-        email:     The email address supplied by the authenticating user.
-        password:  The plaintext password supplied by the authenticating user.
-        db:        An async SQLAlchemy session for the current request.
-        redis:     The shared async Redis client for session storage (SR-10).
-        settings:  Application settings supplying token lifetimes and lockout policy.
-        totp_code: Optional six-to-eight-digit TOTP code.  Must be supplied when
-                   the account has MFA enabled; ignored otherwise (SR-04).
+        email:      The email address supplied by the authenticating user.
+        password:   The plaintext password supplied by the authenticating user.
+        db:         An async SQLAlchemy session for the current request.
+        redis:      The shared async Redis client for session storage (SR-10).
+        settings:   Application settings supplying token lifetimes and lockout policy.
+        totp_code:  Optional six-to-eight-digit TOTP code.  Must be supplied when
+                    the account has MFA enabled; ignored otherwise (SR-04).
+        ip_address: Client IP address extracted from X-Real-IP header by the
+                    router layer (SR-16).
+        user_agent: Raw User-Agent header extracted by the router layer (SR-16).
 
     Returns:
         A 2-tuple ``(access_token, raw_refresh_token)`` on successful
@@ -281,7 +306,8 @@ async def login(
             AuditLog(
                 user_id=None,
                 action="LOGIN_FAILED",
-                ip_address=None,
+                ip_address=ip_address,
+                user_agent=user_agent,
                 details={"reason": "user_not_found"},
             )
         )
@@ -324,11 +350,45 @@ async def login(
                 minutes=settings.account_lockout_minutes
             )
             user.failed_login_count = 0
+            # SR-17: Write a HIGH-severity SecurityEvent for the lockout so
+            # that automated monitoring and the admin role can detect brute-
+            # force attacks without scanning the full audit log (SR-16).
+            db.add(
+                SecurityEvent(
+                    user_id=user.id,
+                    event_type="ACCOUNT_LOCKED",
+                    severity=Severity.HIGH,
+                    ip_address=ip_address,
+                    details={
+                        "failed_login_count": settings.max_failed_login_attempts,
+                        "locked_until": user.locked_until.isoformat()
+                        if user.locked_until
+                        else None,
+                    },
+                )
+            )
+            # SR-16: AuditLog entry for the lockout event (human-readable trail).
+            # The SecurityEvent above serves automated monitoring; this entry
+            # ensures the lockout appears in audit log queries as well.
+            db.add(
+                AuditLog(
+                    user_id=user.id,
+                    action="ACCOUNT_LOCKED",
+                    ip_address=ip_address,
+                    user_agent=user_agent,
+                    details={
+                        "locked_until": user.locked_until.isoformat()
+                        if user.locked_until
+                        else None,
+                    },
+                )
+            )
 
         audit_fail = AuditLog(
             user_id=user.id,
             action="LOGIN_FAILED",
-            ip_address=None,
+            ip_address=ip_address,
+            user_agent=user_agent,
             details={"reason": "invalid_password"},
         )
         db.add(audit_fail)
@@ -362,7 +422,8 @@ async def login(
                 AuditLog(
                     user_id=user.id,
                     action="LOGIN_MFA_REQUIRED",
-                    ip_address=None,
+                    ip_address=ip_address,
+                    user_agent=user_agent,
                     details={"session_id": None},
                 )
             )
@@ -378,7 +439,8 @@ async def login(
                 AuditLog(
                     user_id=user.id,
                     action="MFA_FAILED",
-                    ip_address=None,
+                    ip_address=ip_address,
+                    user_agent=user_agent,
                     details={"reason": "invalid_totp_code"},
                 )
             )
@@ -391,7 +453,8 @@ async def login(
             AuditLog(
                 user_id=user.id,
                 action="MFA_VERIFIED",
-                ip_address=None,
+                ip_address=ip_address,
+                user_agent=user_agent,
                 details={"email": user.email},
             )
         )
@@ -444,7 +507,8 @@ async def login(
     audit_success = AuditLog(
         user_id=user.id,
         action="LOGIN_SUCCESS",
-        ip_address=None,
+        ip_address=ip_address,
+        user_agent=user_agent,
         details={"session_id": session_id},
     )
     db.add(audit_success)
@@ -461,6 +525,8 @@ async def refresh_tokens(
     db: AsyncSession,
     redis: Redis,  # type: ignore[type-arg]
     settings: Settings,
+    ip_address: str | None = None,
+    user_agent: str | None = None,
 ) -> tuple[str, str]:
     """Rotate a refresh token and issue a new access token + refresh token pair.
 
@@ -493,6 +559,10 @@ async def refresh_tokens(
         redis:             The shared async Redis client for session storage.
         settings:          Application settings supplying token lifetimes and
                            signing key.
+        ip_address:        Client IP address extracted from X-Real-IP header by
+                           the router layer (SR-16).
+        user_agent:        Raw User-Agent header extracted by the router layer
+                           (SR-16).
 
     Returns:
         A 2-tuple ``(new_access_token, new_raw_refresh_token)``.  Both must be
@@ -552,6 +622,22 @@ async def refresh_tokens(
         session_keys = [f"session:{rt.session_id}" for rt in all_user_tokens]
         if session_keys:
             await redis.delete(*session_keys)
+        # SR-17: Write a CRITICAL-severity SecurityEvent for token reuse so
+        # that the incident is distinguishable from normal 401s in automated
+        # monitoring dashboards.  All sessions for this user have already been
+        # revoked above; this write records the event for forensic correlation.
+        db.add(
+            SecurityEvent(
+                user_id=token_row.user_id,
+                event_type="TOKEN_REUSE",
+                severity=Severity.CRITICAL,
+                ip_address=ip_address,
+                details={
+                    "session_id": str(token_row.session_id),
+                },
+            )
+        )
+        await db.commit()
         raise HTTPException(
             status_code=401,
             detail="Refresh token already used",
@@ -637,7 +723,8 @@ async def refresh_tokens(
     audit = AuditLog(
         user_id=user.id,
         action="TOKEN_REFRESHED",
-        ip_address=None,
+        ip_address=ip_address,
+        user_agent=user_agent,
         details={"session_id": new_session_id},
     )
     db.add(audit)
@@ -656,6 +743,8 @@ async def logout(
     access_token_payload: dict,
     db: AsyncSession,
     redis: Redis,  # type: ignore[type-arg]
+    ip_address: str | None = None,
+    user_agent: str | None = None,
 ) -> None:
     """Terminate the user's session, revoking both the access token and refresh token.
 
@@ -683,6 +772,10 @@ async def logout(
                               ``session_id`` claims.
         db:                   An async SQLAlchemy session for the current request.
         redis:                The shared async Redis client.
+        ip_address:           Client IP address extracted from X-Real-IP header
+                              by the router layer (SR-16).
+        user_agent:           Raw User-Agent header extracted by the router
+                              layer (SR-16).
     """
     # ------------------------------------------------------------------
     # Step 1: Blacklist the access token JTI with remaining TTL (SR-09).
@@ -735,7 +828,8 @@ async def logout(
     audit = AuditLog(
         user_id=user.id,
         action="LOGOUT",
-        ip_address=None,
+        ip_address=ip_address,
+        user_agent=user_agent,
         details={"session_id": session_id},
     )
     db.add(audit)
@@ -751,6 +845,8 @@ async def disable_mfa(
     password: str,
     totp_code: str,
     db: AsyncSession,
+    ip_address: str | None = None,
+    user_agent: str | None = None,
 ) -> None:
     """Disable MFA for the user after verifying both password and current TOTP code.
 
@@ -767,11 +863,14 @@ async def disable_mfa(
     used by the login and enable_mfa failure paths (SR-16).
 
     Args:
-        user:      The authenticated User requesting MFA deactivation.
-        password:  The plaintext password to verify against the stored hash.
-        totp_code: The six-to-eight-digit TOTP code to verify against the
-                   stored secret.
-        db:        An async SQLAlchemy session for the current request.
+        user:       The authenticated User requesting MFA deactivation.
+        password:   The plaintext password to verify against the stored hash.
+        totp_code:  The six-to-eight-digit TOTP code to verify against the
+                    stored secret.
+        db:         An async SQLAlchemy session for the current request.
+        ip_address: Client IP address extracted from X-Real-IP header by the
+                    router layer (SR-16).
+        user_agent: Raw User-Agent header extracted by the router layer (SR-16).
 
     Raises:
         HTTPException 400: If MFA is not currently enabled on the account.
@@ -802,7 +901,8 @@ async def disable_mfa(
             AuditLog(
                 user_id=user.id,
                 action="MFA_FAILED",
-                ip_address=None,
+                ip_address=ip_address,
+                user_agent=user_agent,
                 details={"reason": "invalid_password"},
             )
         )
@@ -823,7 +923,8 @@ async def disable_mfa(
             AuditLog(
                 user_id=user.id,
                 action="MFA_FAILED",
-                ip_address=None,
+                ip_address=ip_address,
+                user_agent=user_agent,
                 details={"reason": "invalid_totp_code"},
             )
         )
@@ -843,7 +944,8 @@ async def disable_mfa(
         AuditLog(
             user_id=user.id,
             action="MFA_DISABLED",
-            ip_address=None,
+            ip_address=ip_address,
+            user_agent=user_agent,
             details={"email": user.email},
         )
     )
@@ -856,6 +958,8 @@ async def change_password(
     current_password: str,
     new_password: str,
     db: AsyncSession,
+    ip_address: str | None = None,
+    user_agent: str | None = None,
 ) -> None:
     """Change the authenticated user's password after verifying the current one.
 
@@ -870,6 +974,10 @@ async def change_password(
                           stored Argon2id hash.
         new_password:     The plaintext new password.  Must satisfy SR-01.
         db:               An async SQLAlchemy session for the current request.
+        ip_address:       Client IP address extracted from X-Real-IP header by
+                          the router layer (SR-16).
+        user_agent:       Raw User-Agent header extracted by the router layer
+                          (SR-16).
 
     Raises:
         HTTPException 401: If current_password does not match the stored hash.
@@ -908,7 +1016,8 @@ async def change_password(
         AuditLog(
             user_id=user.id,
             action="PASSWORD_CHANGED",
-            ip_address=None,
+            ip_address=ip_address,
+            user_agent=user_agent,
             details={"email": user.email},
         )
     )
@@ -920,12 +1029,273 @@ async def change_password(
     await db.commit()
 
 
+async def request_password_reset(
+    email: str,
+    db: AsyncSession,
+    settings: Settings,  # noqa: ARG001  (reserved for future SMTP use)
+    ip_address: str | None = None,
+    user_agent: str | None = None,
+) -> None:
+    """Issue a one-time password reset token for the given email address.
+
+    Enforces SR-18 (reset token stored as SHA-256 hash only) and the
+    non-enumeration requirement: the caller receives no signal indicating
+    whether the email address belongs to a registered account.
+
+    Algorithm:
+    1. Look up the user by email.
+    2. If not found: write a PASSWORD_RESET_REQUESTED audit log with
+       ``{"email_found": False}`` and return silently.  The HTTP response
+       is always 200 so that an attacker cannot enumerate accounts by
+       observing different responses for known vs unknown emails (SR-18).
+    3. If found: generate a random token, store only its SHA-256 hash in
+       ``user.password_reset_token_hash``, set ``password_reset_sent_at``
+       to the current UTC timestamp, commit, and print the raw token to
+       stdout in demo mode.  Write a PASSWORD_RESET_REQUESTED audit log
+       with ``{"email_found": True}``.
+
+    The raw token is printed in demo mode so that integration tests and
+    manual testing can complete the reset flow without a real email server.
+    In production this print statement must be replaced with an SMTP send.
+
+    Args:
+        email:      The email address for which a reset is requested.
+        db:         An async SQLAlchemy session for the current request.
+        settings:   Application settings (reserved for future SMTP dispatch).
+        ip_address: Client IP address extracted from X-Real-IP header by the
+                    router layer (SR-16).
+        user_agent: Raw User-Agent header extracted by the router layer (SR-16).
+
+    Returns:
+        None.  The caller always returns HTTP 200 regardless of whether the
+        email was found, enforcing non-enumeration (SR-18).
+    """
+    # ------------------------------------------------------------------
+    # Step 1: Look up the user by email.
+    # ------------------------------------------------------------------
+    result = await db.execute(select(User).where(User.email == email))
+    user = result.scalar_one_or_none()
+
+    # ------------------------------------------------------------------
+    # Step 2: Unknown email — write audit and return silently (SR-18).
+    #
+    # Do NOT raise an exception or change the response for an unknown
+    # email.  The caller must return HTTP 200 regardless so that an
+    # attacker cannot enumerate valid accounts by observing error codes.
+    # ------------------------------------------------------------------
+    if user is None:
+        db.add(
+            AuditLog(
+                user_id=None,
+                action="PASSWORD_RESET_REQUESTED",
+                ip_address=ip_address,
+                user_agent=user_agent,
+                details={"email_found": False},
+            )
+        )
+        await db.commit()
+        return
+
+    # ------------------------------------------------------------------
+    # Step 3: Known email — generate token, store hash, commit (SR-18).
+    # ------------------------------------------------------------------
+
+    # Generate a cryptographically random opaque token (256 bits entropy).
+    raw_token = generate_refresh_token()
+
+    # Store only the SHA-256 hash — the raw token is never persisted.
+    user.password_reset_token_hash = hash_token(raw_token)
+    user.password_reset_sent_at = datetime.now(timezone.utc)
+
+    db.add(
+        AuditLog(
+            user_id=user.id,
+            action="PASSWORD_RESET_REQUESTED",
+            ip_address=ip_address,
+            user_agent=user_agent,
+            details={"email_found": True},
+        )
+    )
+
+    await db.commit()
+
+    # DEMO MODE: replace with real SMTP in production.
+    print(  # noqa: T201
+        f"[DEMO MODE] Password reset token for {email}: {raw_token}"
+    )
+
+
+async def confirm_password_reset(
+    token: str,
+    new_password: str,
+    db: AsyncSession,
+    redis: Redis,  # type: ignore[type-arg]
+    settings: Settings,
+    ip_address: str | None = None,
+    user_agent: str | None = None,
+) -> None:
+    """Verify a password reset token and set a new password, revoking all sessions.
+
+    Enforces SR-01 (new password strength), SR-02 (Argon2id hashing), SR-18
+    (token expiry, single-use via field clear), and SR-10/SR-07 (full session
+    and refresh-token revocation on password reset so the account is fully
+    re-authenticated after the credential change).
+
+    Algorithm:
+    1. Hash the submitted token with SHA-256 and look up the user by hash.
+    2. If not found: raise HTTP 400 with a generic error (no enumeration).
+    3. Enforce expiry window via ``settings.password_reset_token_ttl_minutes``.
+       Apply ADR-17 timezone normalisation for SQLite naive datetimes.
+    4. Validate new password strength (SR-01) → raise 422 if weak.
+    5. Hash and store the new password (SR-02).
+    6. Clear ``password_reset_token_hash`` and ``password_reset_sent_at`` so
+       the token cannot be reused.
+    7. Bulk-delete all ``RefreshToken`` rows for this user (SR-07).
+    8. Scan Redis for all ``session:*`` keys whose stored value equals
+       ``str(user.id)`` and delete them (SR-10).
+    9. Commit all DB changes atomically.
+    10. Write a PASSWORD_RESET_COMPLETED audit log (SR-16).
+
+    Args:
+        token:        The raw reset token received from the client.
+        new_password: The plaintext new password to set.
+        db:           An async SQLAlchemy session for the current request.
+        redis:        The shared async Redis client for session revocation.
+        settings:     Application settings supplying the token TTL and policies.
+        ip_address:   Client IP address extracted from X-Real-IP header by the
+                      router layer (SR-16).
+        user_agent:   Raw User-Agent header extracted by the router layer (SR-16).
+
+    Returns:
+        None.
+
+    Raises:
+        HTTPException 400: If the token is not found or has expired.
+        HTTPException 422: If new_password fails the SR-01 strength policy.
+    """
+    # ------------------------------------------------------------------
+    # Step 1: Hash the submitted token and look up the user by hash.
+    # ------------------------------------------------------------------
+    token_hash = hash_token(token)
+    result = await db.execute(
+        select(User).where(User.password_reset_token_hash == token_hash)
+    )
+    user = result.scalar_one_or_none()
+
+    # ------------------------------------------------------------------
+    # Step 2: Token not found → reject with a generic message.
+    #
+    # The error message is intentionally identical to the expiry error
+    # below so that an attacker cannot distinguish between an invalid
+    # token and an expired one (no oracle).
+    # ------------------------------------------------------------------
+    if user is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid or expired reset token",
+        )
+
+    # ------------------------------------------------------------------
+    # Step 3: Expiry check (ADR-17: normalise naive datetimes from SQLite).
+    #
+    # SQLite returns DateTime(timezone=True) columns as naive datetimes.
+    # Attaching UTC ensures the comparison is safe across both SQLite
+    # (tests) and PostgreSQL (production).
+    # ------------------------------------------------------------------
+    sent_at = user.password_reset_sent_at
+    if sent_at is None:
+        # Defensive guard: hash present but timestamp missing — treat as expired.
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid or expired reset token",
+        )
+
+    if sent_at.tzinfo is None:
+        sent_at = sent_at.replace(tzinfo=timezone.utc)
+
+    expiry_window = timedelta(minutes=settings.password_reset_token_ttl_minutes)
+    if datetime.now(timezone.utc) > sent_at + expiry_window:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid or expired reset token",
+        )
+
+    # ------------------------------------------------------------------
+    # Step 4: Validate new password strength (SR-01).
+    # Checked before any DB mutation so no state is changed on rejection.
+    # ------------------------------------------------------------------
+    if not is_password_strong(new_password):
+        raise HTTPException(
+            status_code=422,
+            detail="Password does not meet strength requirements",
+        )
+
+    # ------------------------------------------------------------------
+    # Step 5: Hash and store the new password (SR-02).
+    # The plaintext new_password is never persisted.
+    # ------------------------------------------------------------------
+    user.hashed_password = hash_password(new_password)
+
+    # ------------------------------------------------------------------
+    # Step 6: Consume the reset token — clear both fields so the same
+    # raw token cannot be reused even if the attacker captured it.
+    # ------------------------------------------------------------------
+    user.password_reset_token_hash = None
+    user.password_reset_sent_at = None
+
+    # ------------------------------------------------------------------
+    # Step 7: Bulk-delete all refresh tokens for this user (SR-07).
+    #
+    # A direct DELETE statement is used rather than ORM iteration so that
+    # all rows are removed in a single round-trip regardless of how many
+    # active sessions the user has.
+    # ------------------------------------------------------------------
+    await db.execute(delete(RefreshToken).where(RefreshToken.user_id == user.id))
+
+    # ------------------------------------------------------------------
+    # Step 8: Revoke all Redis sessions for this user (SR-10).
+    #
+    # Sessions are stored under keys "session:{session_id}" with the value
+    # set to str(user.id) (see login() above).  We scan for all session
+    # keys and delete those whose stored value matches this user's ID.
+    # scan_iter is non-blocking and works correctly on FakeRedis in tests.
+    # ------------------------------------------------------------------
+    user_id_str = str(user.id)
+    keys_to_delete: list[str] = []
+    async for key in redis.scan_iter("session:*"):
+        value = await redis.get(key)
+        if value == user_id_str:
+            keys_to_delete.append(key)
+
+    if keys_to_delete:
+        await redis.delete(*keys_to_delete)
+
+    # ------------------------------------------------------------------
+    # Step 9: Write audit log entry and commit all DB mutations atomically.
+    # The audit row, password update, token clear, and RT deletions are
+    # all committed in a single transaction so they are always consistent.
+    # ------------------------------------------------------------------
+    db.add(
+        AuditLog(
+            user_id=user.id,
+            action="PASSWORD_RESET_COMPLETED",
+            ip_address=ip_address,
+            user_agent=user_agent,
+            details={"email": user.email},
+        )
+    )
+
+    await db.commit()
+
+
 async def verify_step_up(
     user: User,
     totp_code: str,
     db: AsyncSession,
     redis: Redis,  # type: ignore[type-arg]
     settings: Settings,
+    ip_address: str | None = None,
+    user_agent: str | None = None,
 ) -> str:
     """Verify a TOTP code and issue a short-lived step-up JWT.
 
@@ -950,11 +1320,14 @@ async def verify_step_up(
     ``enable_mfa`` and ``login`` TOTP failure paths (SR-16).
 
     Args:
-        user:      The authenticated, verified User requesting step-up.
-        totp_code: The six-to-eight-digit TOTP code from the authenticator app.
-        db:        An async SQLAlchemy session for the current request.
-        redis:     The shared async Redis client for step-up token storage.
-        settings:  Application settings supplying token lifetime and signing key.
+        user:       The authenticated, verified User requesting step-up.
+        totp_code:  The six-to-eight-digit TOTP code from the authenticator app.
+        db:         An async SQLAlchemy session for the current request.
+        redis:      The shared async Redis client for step-up token storage.
+        settings:   Application settings supplying token lifetime and signing key.
+        ip_address: Client IP address extracted from X-Real-IP header by the
+                    router layer (SR-16).
+        user_agent: Raw User-Agent header extracted by the router layer (SR-16).
 
     Returns:
         The compact step-up JWT string.  The caller (router) wraps this in
@@ -989,7 +1362,8 @@ async def verify_step_up(
             AuditLog(
                 user_id=user.id,
                 action="STEP_UP_FAILED",
-                ip_address=None,
+                ip_address=ip_address,
+                user_agent=user_agent,
                 details={"reason": "invalid_totp_code"},
             )
         )
@@ -1023,7 +1397,8 @@ async def verify_step_up(
         AuditLog(
             user_id=user.id,
             action="STEP_UP_VERIFIED",
-            ip_address=None,
+            ip_address=ip_address,
+            user_agent=user_agent,
             details={"jti": jti},
         )
     )
@@ -1036,6 +1411,8 @@ async def setup_mfa(
     user: User,
     db: AsyncSession,
     settings: Settings,
+    ip_address: str | None = None,
+    user_agent: str | None = None,
 ) -> tuple[str, str]:
     """Generate and store a TOTP secret for the user, returning the secret and QR code.
 
@@ -1056,10 +1433,13 @@ async def setup_mfa(
     subsequent API calls must never reveal it.
 
     Args:
-        user:     The authenticated User requesting MFA enrollment.
-        db:       An async SQLAlchemy session for the current request.
-        settings: Application settings supplying ``app_name`` as the TOTP
-                  issuer name shown inside the authenticator app.
+        user:       The authenticated User requesting MFA enrollment.
+        db:         An async SQLAlchemy session for the current request.
+        settings:   Application settings supplying ``app_name`` as the TOTP
+                    issuer name shown inside the authenticator app.
+        ip_address: Client IP address extracted from X-Real-IP header by the
+                    router layer (SR-16).
+        user_agent: Raw User-Agent header extracted by the router layer (SR-16).
 
     Returns:
         A 2-tuple ``(secret, qr_code_base64)`` where ``secret`` is the
@@ -1100,7 +1480,8 @@ async def setup_mfa(
     audit = AuditLog(
         user_id=user.id,
         action="MFA_SETUP_INITIATED",
-        ip_address=None,
+        ip_address=ip_address,
+        user_agent=user_agent,
         details={"email": user.email},
     )
     db.add(audit)
@@ -1124,6 +1505,8 @@ async def enable_mfa(
     user: User,
     totp_code: str,
     db: AsyncSession,
+    ip_address: str | None = None,
+    user_agent: str | None = None,
 ) -> None:
     """Verify the first TOTP code and activate MFA for the user.
 
@@ -1142,9 +1525,12 @@ async def enable_mfa(
     pattern used by the login failure path (SR-16).
 
     Args:
-        user:      The authenticated User requesting MFA activation.
-        totp_code: The six-to-eight-digit TOTP code submitted by the user.
-        db:        An async SQLAlchemy session for the current request.
+        user:       The authenticated User requesting MFA activation.
+        totp_code:  The six-to-eight-digit TOTP code submitted by the user.
+        db:         An async SQLAlchemy session for the current request.
+        ip_address: Client IP address extracted from X-Real-IP header by the
+                    router layer (SR-16).
+        user_agent: Raw User-Agent header extracted by the router layer (SR-16).
 
     Raises:
         HTTPException 400: If ``user.mfa_secret`` is None (setup was never
@@ -1185,7 +1571,8 @@ async def enable_mfa(
             AuditLog(
                 user_id=user.id,
                 action="MFA_FAILED",
-                ip_address=None,
+                ip_address=ip_address,
+                user_agent=user_agent,
                 details={"reason": "invalid_totp_code"},
             )
         )
@@ -1203,7 +1590,8 @@ async def enable_mfa(
         AuditLog(
             user_id=user.id,
             action="MFA_ENABLED",
-            ip_address=None,
+            ip_address=ip_address,
+            user_agent=user_agent,
             details={"email": user.email},
         )
     )

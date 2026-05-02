@@ -90,8 +90,8 @@ Abuse cases describe concrete attack scenarios that inform the threat model. The
 
 | # | Threat | Component | Attack Vector | Mitigation | SR Reference |
 |---|--------|-----------|---------------|-----------|-------------|
-| R-01 | User denies performing a transfer | Transaction records | User claims they did not initiate a transfer | Audit log records transfer initiation with user ID, IP, timestamp, session ID; JWT sub claim ties action to identity (SR-16) | SR-16 |
-| R-02 | User denies login from a specific IP | Audit log | User denies accessing account from a location | Audit log captures IP address and user agent for every login event (SR-16) | SR-16 |
+| R-01 | User denies performing a transfer | Transaction records | User claims they did not initiate a transfer | Audit log records transfer initiation with user ID, IP (from ``X-Real-IP`` header), timestamp, session ID; JWT sub claim ties action to identity (SR-16) | SR-16 |
+| R-02 | User denies login from a specific IP | Audit log | User denies accessing account from a location | Audit log captures IP address (from ``X-Real-IP`` header) and user agent (from ``User-Agent`` header) for every login event; values are extracted at the router layer and passed as plain strings to the service layer (SR-16) | SR-16 |
 | R-03 | Admin denies performing account changes | Audit log | Admin denies deactivating a user | Admin actions recorded with actor's user ID, action, timestamp (SR-16) | SR-16 |
 
 ---

@@ -37,6 +37,7 @@ from app.core.config import Settings
 from app.core.security import decode_step_up_token
 from app.models.account import Account, AccountStatus
 from app.models.audit_log import AuditLog
+from app.models.security_event import SecurityEvent, Severity
 from app.models.transaction import Transaction, TransactionStatus, TransactionType
 from app.models.user import User
 from app.schemas.transaction import (
@@ -51,6 +52,8 @@ async def _write_audit(
     user_id: uuid.UUID,
     action: str,
     details: dict,  # type: ignore[type-arg]
+    ip_address: str | None = None,
+    user_agent: str | None = None,
 ) -> None:
     """Append an audit log entry and commit it immediately.
 
@@ -59,15 +62,20 @@ async def _write_audit(
     auth service for MFA_FAILED and STEP_UP_BYPASS_ATTEMPT entries (SR-16).
 
     Args:
-        db:       The active async database session.
-        user_id:  UUID of the user performing the action.
-        action:   Audit action string (e.g. ``"TRANSFER_INITIATED"``).
-        details:  Arbitrary JSON-serialisable dict attached to the log entry.
+        db:         The active async database session.
+        user_id:    UUID of the user performing the action.
+        action:     Audit action string (e.g. ``"TRANSFER_INITIATED"``).
+        details:    Arbitrary JSON-serialisable dict attached to the log entry.
+        ip_address: Client IP address extracted from X-Real-IP header by the
+                    router layer (SR-16).
+        user_agent: Raw User-Agent header extracted by the router layer (SR-16).
     """
     db.add(
         AuditLog(
             user_id=user_id,
             action=action,
+            ip_address=ip_address,
+            user_agent=user_agent,
             details=details,
         )
     )
@@ -80,6 +88,8 @@ async def _validate_step_up_token(
     redis: Redis,  # type: ignore[type-arg]
     settings: Settings,
     db: AsyncSession,
+    ip_address: str | None = None,
+    user_agent: str | None = None,
 ) -> None:
     """Validate the step-up token when a transfer meets the threshold.
 
@@ -103,6 +113,10 @@ async def _validate_step_up_token(
         db:              Active async database session (used to persist the
                          ``STEP_UP_BYPASS_ATTEMPT`` audit row on subject
                          mismatch).
+        ip_address:      Client IP address extracted from X-Real-IP header by
+                         the router layer (SR-16).
+        user_agent:      Raw User-Agent header extracted by the router layer
+                         (SR-16).
 
     Raises:
         HTTPException 403: If the token is absent, invalid, expired, bound to
@@ -143,7 +157,26 @@ async def _validate_step_up_token(
                 "token_sub": sub,
                 "current_user_id": str(current_user.id),
             },
+            ip_address=ip_address,
+            user_agent=user_agent,
         )
+        # SR-17: Write a HIGH-severity SecurityEvent for the subject-mismatch
+        # bypass attempt.  The audit log records the action for the audit trail;
+        # this SecurityEvent surfaces it to automated anomaly detection systems
+        # that monitor the security_events table rather than the full audit log.
+        db.add(
+            SecurityEvent(
+                user_id=current_user.id,
+                event_type="STEP_UP_BYPASS_ATTEMPT",
+                severity=Severity.HIGH,
+                ip_address=ip_address,
+                details={
+                    "reason": "subject_mismatch",
+                    "token_sub": sub,
+                },
+            )
+        )
+        await db.commit()
         raise HTTPException(
             status_code=403,
             detail="Step-up token subject mismatch",
@@ -165,6 +198,8 @@ async def execute_transfer(
     db: AsyncSession,
     redis: Redis,  # type: ignore[type-arg]
     settings: Settings,
+    ip_address: str | None = None,
+    user_agent: str | None = None,
 ) -> Transaction:
     """Execute a fund transfer from the authenticated user's account.
 
@@ -202,6 +237,10 @@ async def execute_transfer(
         db:              Active async database session.
         redis:           Async Redis client (step-up token consumption).
         settings:        Application settings (threshold, signing key).
+        ip_address:      Client IP address extracted from X-Real-IP header by
+                         the router layer (SR-16).
+        user_agent:      Raw User-Agent header extracted by the router layer
+                         (SR-16).
 
     Returns:
         The newly created ``Transaction`` row with status COMPLETED.
@@ -226,6 +265,8 @@ async def execute_transfer(
             "to_account_number": request.to_account_number,
             "amount": str(request.amount),
         },
+        ip_address=ip_address,
+        user_agent=user_agent,
     )
 
     # ------------------------------------------------------------------
@@ -242,6 +283,8 @@ async def execute_transfer(
             user_id=current_user.id,
             action="TRANSFER_REJECTED",
             details={"reason": "no_account"},
+            ip_address=ip_address,
+            user_agent=user_agent,
         )
         raise HTTPException(status_code=400, detail="No account found")
 
@@ -258,6 +301,8 @@ async def execute_transfer(
                 "reason": "account_not_active",
                 "account_id": str(from_account.id),
             },
+            ip_address=ip_address,
+            user_agent=user_agent,
         )
         raise HTTPException(status_code=400, detail="Account is not active")
 
@@ -280,6 +325,8 @@ async def execute_transfer(
                 "reason": "destination_not_found",
                 "to_account_number": request.to_account_number,
             },
+            ip_address=ip_address,
+            user_agent=user_agent,
         )
         raise HTTPException(status_code=400, detail="Destination account not found")
 
@@ -297,6 +344,8 @@ async def execute_transfer(
                 "reason": "self_transfer",
                 "account_id": str(from_account.id),
             },
+            ip_address=ip_address,
+            user_agent=user_agent,
         )
         raise HTTPException(status_code=422, detail="Cannot transfer to own account")
 
@@ -313,11 +362,49 @@ async def execute_transfer(
                 "reason": "destination_not_active",
                 "to_account_number": request.to_account_number,
             },
+            ip_address=ip_address,
+            user_agent=user_agent,
         )
         raise HTTPException(status_code=400, detail="Destination account is not active")
 
     # ------------------------------------------------------------------
-    # Step 7: Balance check.
+    # Step 7: Step-up token gate (SR-13, SR-14).
+    # Checked before balance so that a missing step-up token always
+    # returns 403 regardless of account balance — prevents leaking
+    # balance state to unauthenticated high-value requests.
+    # The threshold is stored in integer cents (e.g. 100000 = $1000.00).
+    # ------------------------------------------------------------------
+    threshold: Decimal = Decimal(settings.step_up_transfer_threshold) / Decimal(100)
+    if request.amount >= threshold:
+        try:
+            await _validate_step_up_token(
+                x_step_up_token=x_step_up_token,
+                current_user=current_user,
+                redis=redis,
+                settings=settings,
+                db=db,
+                ip_address=ip_address,
+                user_agent=user_agent,
+            )
+        except HTTPException:
+            await _write_audit(
+                db=db,
+                user_id=current_user.id,
+                action="TRANSFER_REJECTED",
+                details={
+                    "reason": "step_up_required"
+                    if x_step_up_token is None
+                    else "invalid_step_up",
+                    "amount": str(request.amount),
+                    "threshold": str(threshold),
+                },
+                ip_address=ip_address,
+                user_agent=user_agent,
+            )
+            raise
+
+    # ------------------------------------------------------------------
+    # Step 8: Balance check.
     # The balance column is Numeric(18,2) — SQLAlchemy returns Decimal.
     # request.amount is Decimal (validated by the Pydantic schema).
     # No float arithmetic is performed (SR-20).
@@ -332,39 +419,10 @@ async def execute_transfer(
                 "balance": str(from_account.balance),
                 "requested": str(request.amount),
             },
+            ip_address=ip_address,
+            user_agent=user_agent,
         )
         raise HTTPException(status_code=400, detail="Insufficient balance")
-
-    # ------------------------------------------------------------------
-    # Step 8: Step-up token gate (SR-13, SR-14).
-    # The threshold is stored in integer cents (e.g. 100000 = $1000.00).
-    # Convert to Decimal dollars before comparing with request.amount.
-    # This decision is enforced server-side — the client cannot bypass it.
-    # ------------------------------------------------------------------
-    threshold: Decimal = Decimal(settings.step_up_transfer_threshold) / Decimal(100)
-    if request.amount >= threshold:
-        try:
-            await _validate_step_up_token(
-                x_step_up_token=x_step_up_token,
-                current_user=current_user,
-                redis=redis,
-                settings=settings,
-                db=db,
-            )
-        except HTTPException:
-            await _write_audit(
-                db=db,
-                user_id=current_user.id,
-                action="TRANSFER_REJECTED",
-                details={
-                    "reason": "step_up_required"
-                    if x_step_up_token is None
-                    else "invalid_step_up",
-                    "amount": str(request.amount),
-                    "threshold": str(threshold),
-                },
-            )
-            raise
 
     # ------------------------------------------------------------------
     # Step 9: Atomic balance update and transaction creation.
@@ -405,6 +463,8 @@ async def execute_transfer(
             "to_account_id": str(to_account.id),
             "amount": str(request.amount),
         },
+        ip_address=ip_address,
+        user_agent=user_agent,
     )
 
     # ------------------------------------------------------------------
@@ -418,6 +478,8 @@ async def get_transaction_history(
     db: AsyncSession,
     page: int,
     page_size: int,
+    ip_address: str | None = None,
+    user_agent: str | None = None,
 ) -> TransactionHistoryResponse:
     """Return a paginated list of transactions for the authenticated user.
 
@@ -440,6 +502,10 @@ async def get_transaction_history(
         db:           Active async database session.
         page:         1-indexed page number (must be >= 1).
         page_size:    Number of transactions per page (must be 1–100).
+        ip_address:   Client IP address extracted from X-Real-IP header by
+                      the router layer (SR-16).
+        user_agent:   Raw User-Agent header extracted by the router layer
+                      (SR-16).
 
     Returns:
         ``TransactionHistoryResponse`` containing a paginated list of
@@ -467,6 +533,8 @@ async def get_transaction_history(
             user_id=current_user.id,
             action="TRANSACTIONS_VIEWED",
             details={"page": page, "page_size": page_size, "total": 0},
+            ip_address=ip_address,
+            user_agent=user_agent,
         )
         return TransactionHistoryResponse(
             items=[],
@@ -519,6 +587,8 @@ async def get_transaction_history(
             "total": total,
             "account_id": str(account.id),
         },
+        ip_address=ip_address,
+        user_agent=user_agent,
     )
 
     return TransactionHistoryResponse(

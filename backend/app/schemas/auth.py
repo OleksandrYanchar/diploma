@@ -24,11 +24,14 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1)
     # TOTP code is optional at the schema level; the service layer raises 401
     # if it is absent when the account has MFA enabled (SR-04).
+    # pattern rejects non-digit characters at the schema boundary, preventing
+    # injection of arbitrary strings into the TOTP verification path.
     totp_code: str | None = Field(
         default=None,
         min_length=6,
         max_length=8,
-        description="Six-digit TOTP code.  Required when MFA is enabled.",
+        pattern=r"^[0-9]{6,8}$",
+        description="Six-to-eight digit TOTP code.  Required when MFA is enabled.",
     )
 
 
@@ -98,7 +101,11 @@ class MFAEnableRequest(BaseModel):
     This proves they have successfully scanned the QR code (SR-04).
     """
 
-    totp_code: str = Field(min_length=6, max_length=8)
+    totp_code: str = Field(
+        min_length=6,
+        max_length=8,
+        pattern=r"^[0-9]{6,8}$",
+    )
 
 
 class MFADisableRequest(BaseModel):
@@ -109,7 +116,11 @@ class MFADisableRequest(BaseModel):
     """
 
     password: str = Field(min_length=1)
-    totp_code: str = Field(min_length=6, max_length=8)
+    totp_code: str = Field(
+        min_length=6,
+        max_length=8,
+        pattern=r"^[0-9]{6,8}$",
+    )
 
 
 class StepUpRequest(BaseModel):
@@ -119,7 +130,11 @@ class StepUpRequest(BaseModel):
     that authorises a single sensitive operation (SR-13).
     """
 
-    totp_code: str = Field(min_length=6, max_length=8)
+    totp_code: str = Field(
+        min_length=6,
+        max_length=8,
+        pattern=r"^[0-9]{6,8}$",
+    )
 
 
 class StepUpResponse(BaseModel):
