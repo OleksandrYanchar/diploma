@@ -19,9 +19,9 @@ Flags:
 Docker note:
     The default --base-url is http://localhost:8000 (direct backend, no rate
     limits). This requires port 8000 to be exposed. The repo includes
-    docker-compose.test-override.yml for this. Start the stack with:
+    docker-compose.test.yml for this. Start the stack with:
 
-        docker compose -f docker-compose.yml -f docker-compose.test-override.yml up -d
+        docker compose -f docker-compose.test.yml up -d
 
     Or just:
         docker compose up -d
@@ -1506,13 +1506,13 @@ class VerificationRunner:
             ## Docker startup commands used
 
             ```bash
-            # Start stack (requires docker-compose.test-override.yml for port 8000):
-            docker compose -f docker-compose.yml -f docker-compose.test-override.yml up -d
+            # Start stack (test stack, PostgreSQL on 5434, Redis on 6380, backend on 8000):
+            docker compose -f docker-compose.test.yml up -d
             # Or through nginx:
             docker compose up -d
 
             # Apply migrations:
-            docker exec diploma-backend-1 alembic upgrade head
+            docker exec diploma-test-backend-1 alembic upgrade head
             ```
 
             ## Failures
@@ -1552,8 +1552,8 @@ def print_startup_instructions() -> None:
 
         Option A — expose backend directly on port 8000 (recommended, no rate limits):
             cd /path/to/diploma
-            docker compose -f docker-compose.yml -f docker-compose.test-override.yml up -d
-            docker exec diploma-backend-1 alembic upgrade head
+            docker compose -f docker-compose.test.yml up -d
+            docker exec diploma-test-backend-1 alembic upgrade head
 
         Option B — through nginx on port 80 (rate limits apply):
             cd /path/to/diploma
@@ -1607,9 +1607,8 @@ def main() -> None:
     # Optionally start Docker
     if args.start_docker:
         print("\nStarting Docker stack…")
-        compose_file = _REPO_ROOT / "docker-compose.yml"
-        override_file = _REPO_ROOT / "docker-compose.test-override.yml"
-        ok, log = start_docker_stack(compose_file, override_file)
+        compose_file = _REPO_ROOT / "docker-compose.test.yml"
+        ok, log = start_docker_stack(compose_file)
         if not ok:
             print(f"Docker startup failed:\n{log}")
             sys.exit(1)
