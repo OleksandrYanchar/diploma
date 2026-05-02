@@ -1,0 +1,57 @@
+{
+  "method": "GET",
+  "path": "/api/v1/transactions/history",
+  "authentication": "Bearer (email verification required)",
+  "headers": {
+    "Authorization": "Bearer {{access_token_verified}}"
+  },
+  "queryParameters": {
+    "page": "Page number, default 1 (must be >= 1)",
+    "page_size": "Items per page, default 50, max 100"
+  },
+  "notes": "Returns only transactions where the authenticated user is sender or recipient (ownership enforcement). Results are ordered by created_at descending. page_size > 100 returns 422.",
+  "scenarios": {
+    "success_default_pagination": {
+      "description": "Own transaction history with default pagination.",
+      "query": {},
+      "expectedStatus": 200,
+      "responseShape": {
+        "items": [],
+        "total": 0,
+        "page": 1,
+        "page_size": 50
+      }
+    },
+    "success_custom_pagination": {
+      "description": "Page 1, 10 items per page.",
+      "query": {
+        "page": "1",
+        "page_size": "10"
+      },
+      "expectedStatus": 200
+    },
+    "failure_unverified_403": {
+      "description": "Email not verified. SR-03 gate rejects access.",
+      "headers": {
+        "Authorization": "Bearer {{access_token_unverified}}"
+      },
+      "expectedStatus": 403
+    },
+    "failure_no_bearer_403": {
+      "headers": {},
+      "expectedStatus": 403
+    },
+    "validation_page_size_too_large_422": {
+      "query": {
+        "page_size": "200"
+      },
+      "expectedStatus": 422
+    },
+    "validation_page_zero_422": {
+      "query": {
+        "page": "0"
+      },
+      "expectedStatus": 422
+    }
+  }
+}

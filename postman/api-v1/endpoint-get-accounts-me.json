@@ -1,0 +1,42 @@
+{
+  "method": "GET",
+  "path": "/api/v1/accounts/me",
+  "authentication": "Bearer (email verification required)",
+  "headers": {
+    "Authorization": "Bearer {{access_token_verified}}"
+  },
+  "notes": "Creates the account on first access (lazy provisioning — SR-03). Subsequent calls return the same account (idempotent). Account number is a zero-padded 12-digit string assigned at creation. Unverified users receive 403.",
+  "scenarios": {
+    "success_first_access": {
+      "description": "Verified user with no existing account. Account is created and returned.",
+      "expectedStatus": 200,
+      "responseShape": {
+        "account_number": "000000000001",
+        "balance": "0.00",
+        "status": "ACTIVE",
+        "owner_id": "<UUID>"
+      }
+    },
+    "success_idempotent": {
+      "description": "Second request for the same user. Returns the same account without creating a new one.",
+      "expectedStatus": 200
+    },
+    "failure_unverified_403": {
+      "description": "Email not yet verified. SR-03 gate rejects access.",
+      "headers": {
+        "Authorization": "Bearer {{access_token_unverified}}"
+      },
+      "expectedStatus": 403
+    },
+    "failure_no_bearer_403": {
+      "headers": {},
+      "expectedStatus": 403
+    },
+    "failure_invalid_jwt_401": {
+      "headers": {
+        "Authorization": "Bearer invalid.jwt.here"
+      },
+      "expectedStatus": 401
+    }
+  }
+}

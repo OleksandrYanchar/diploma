@@ -49,6 +49,10 @@
     {
       "key": "access_token_admin_unverified",
       "value": ""
+    },
+    {
+      "key": "step_up_token",
+      "value": ""
     }
   ],
   "item": [
@@ -1521,6 +1525,245 @@
           ]
         },
         {
+          "name": "Password reset",
+          "item": [
+            {
+              "name": "Password reset request — known email (200)",
+              "request": {
+                "method": "POST",
+                "header": [{"key": "Content-Type", "value": "application/json"}],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/auth/password/reset/request",
+                  "host": ["{{baseUrl}}"],
+                  "path": ["api", "v1", "auth", "password", "reset", "request"]
+                },
+                "description": "Always 200 regardless of whether the email exists (enumeration protection).",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"email\": \"registered.user@example.com\"\n}",
+                  "options": {"raw": {"language": "json"}}
+                }
+              }
+            },
+            {
+              "name": "Password reset request — unknown email (200)",
+              "request": {
+                "method": "POST",
+                "header": [{"key": "Content-Type", "value": "application/json"}],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/auth/password/reset/request",
+                  "host": ["{{baseUrl}}"],
+                  "path": ["api", "v1", "auth", "password", "reset", "request"]
+                },
+                "description": "Identical 200 response for unknown email — prevents email enumeration.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"email\": \"nobody@example.com\"\n}",
+                  "options": {"raw": {"language": "json"}}
+                }
+              }
+            },
+            {
+              "name": "Password reset request — invalid email (422)",
+              "request": {
+                "method": "POST",
+                "header": [{"key": "Content-Type", "value": "application/json"}],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/auth/password/reset/request",
+                  "host": ["{{baseUrl}}"],
+                  "path": ["api", "v1", "auth", "password", "reset", "request"]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"email\": \"not-an-email\"\n}",
+                  "options": {"raw": {"language": "json"}}
+                }
+              }
+            },
+            {
+              "name": "Password reset confirm — valid token (200)",
+              "request": {
+                "method": "POST",
+                "header": [{"key": "Content-Type", "value": "application/json"}],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/auth/password/reset/confirm",
+                  "host": ["{{baseUrl}}"],
+                  "path": ["api", "v1", "auth", "password", "reset", "confirm"]
+                },
+                "description": "Obtain raw token from backend stdout after calling /reset/request.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"token\": \"REPLACE_WITH_RAW_RESET_TOKEN\",\n  \"new_password\": \"BrandNewPass1!\"\n}",
+                  "options": {"raw": {"language": "json"}}
+                }
+              }
+            },
+            {
+              "name": "Password reset confirm — invalid token (400)",
+              "request": {
+                "method": "POST",
+                "header": [{"key": "Content-Type", "value": "application/json"}],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/auth/password/reset/confirm",
+                  "host": ["{{baseUrl}}"],
+                  "path": ["api", "v1", "auth", "password", "reset", "confirm"]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"token\": \"invalid-or-used-token\",\n  \"new_password\": \"BrandNewPass1!\"\n}",
+                  "options": {"raw": {"language": "json"}}
+                }
+              }
+            },
+            {
+              "name": "Password reset confirm — weak password (422)",
+              "request": {
+                "method": "POST",
+                "header": [{"key": "Content-Type", "value": "application/json"}],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/auth/password/reset/confirm",
+                  "host": ["{{baseUrl}}"],
+                  "path": ["api", "v1", "auth", "password", "reset", "confirm"]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"token\": \"REPLACE_WITH_RAW_RESET_TOKEN\",\n  \"new_password\": \"short\"\n}",
+                  "options": {"raw": {"language": "json"}}
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "Step-up auth",
+          "item": [
+            {
+              "name": "Step-up — valid TOTP (200)",
+              "request": {
+                "method": "POST",
+                "header": [{"key": "Content-Type", "value": "application/json"}],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/auth/step-up",
+                  "host": ["{{baseUrl}}"],
+                  "path": ["api", "v1", "auth", "step-up"]
+                },
+                "description": "Returns step_up_token. Save it as {{step_up_token}} for use in X-Step-Up-Token header.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"totp_code\": \"123456\"\n}",
+                  "options": {"raw": {"language": "json"}}
+                },
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [{"key": "token", "value": "{{access_token_verified_mfa}}", "type": "string"}]
+                }
+              }
+            },
+            {
+              "name": "Step-up — wrong TOTP (401)",
+              "request": {
+                "method": "POST",
+                "header": [{"key": "Content-Type", "value": "application/json"}],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/auth/step-up",
+                  "host": ["{{baseUrl}}"],
+                  "path": ["api", "v1", "auth", "step-up"]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"totp_code\": \"000000\"\n}",
+                  "options": {"raw": {"language": "json"}}
+                },
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [{"key": "token", "value": "{{access_token_verified_mfa}}", "type": "string"}]
+                }
+              }
+            },
+            {
+              "name": "Step-up — MFA not enabled (403)",
+              "request": {
+                "method": "POST",
+                "header": [{"key": "Content-Type", "value": "application/json"}],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/auth/step-up",
+                  "host": ["{{baseUrl}}"],
+                  "path": ["api", "v1", "auth", "step-up"]
+                },
+                "description": "User has no MFA secret — step-up is only available after MFA enable.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"totp_code\": \"123456\"\n}",
+                  "options": {"raw": {"language": "json"}}
+                },
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [{"key": "token", "value": "{{access_token_verified}}", "type": "string"}]
+                }
+              }
+            },
+            {
+              "name": "Step-up — unverified (403)",
+              "request": {
+                "method": "POST",
+                "header": [{"key": "Content-Type", "value": "application/json"}],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/auth/step-up",
+                  "host": ["{{baseUrl}}"],
+                  "path": ["api", "v1", "auth", "step-up"]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"totp_code\": \"123456\"\n}",
+                  "options": {"raw": {"language": "json"}}
+                },
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [{"key": "token", "value": "{{access_token_unverified}}", "type": "string"}]
+                }
+              }
+            },
+            {
+              "name": "Step-up — no bearer (403)",
+              "request": {
+                "method": "POST",
+                "header": [{"key": "Content-Type", "value": "application/json"}],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/auth/step-up",
+                  "host": ["{{baseUrl}}"],
+                  "path": ["api", "v1", "auth", "step-up"]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"totp_code\": \"123456\"\n}",
+                  "options": {"raw": {"language": "json"}}
+                }
+              }
+            },
+            {
+              "name": "Step-up — totp too short (422)",
+              "request": {
+                "method": "POST",
+                "header": [{"key": "Content-Type", "value": "application/json"}],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/auth/step-up",
+                  "host": ["{{baseUrl}}"],
+                  "path": ["api", "v1", "auth", "step-up"]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"totp_code\": \"12345\"\n}",
+                  "options": {"raw": {"language": "json"}}
+                },
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [{"key": "token", "value": "{{access_token_verified_mfa}}", "type": "string"}]
+                }
+              }
+            }
+          ]
+        },
+        {
           "name": "Password change",
           "item": [
             {
@@ -2014,6 +2257,366 @@
             },
             "description": ""
           }
+        }
+      ]
+    },
+    {
+      "name": "Accounts",
+      "item": [
+        {
+          "name": "Accounts me \u2014 first access creates account (200)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/accounts/me",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "accounts", "me"]
+            },
+            "description": "Verified user with no account yet. Account is created on first call (lazy provisioning).",
+            "auth": {
+              "type": "bearer",
+              "bearer": [{"key": "token", "value": "{{access_token_verified}}", "type": "string"}]
+            }
+          }
+        },
+        {
+          "name": "Accounts me \u2014 subsequent access idempotent (200)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/accounts/me",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "accounts", "me"]
+            },
+            "description": "Second call returns the same account without creating a new one.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [{"key": "token", "value": "{{access_token_verified}}", "type": "string"}]
+            }
+          }
+        },
+        {
+          "name": "Accounts me \u2014 unverified (403)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/accounts/me",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "accounts", "me"]
+            },
+            "description": "Email not verified. SR-03 gate rejects access.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [{"key": "token", "value": "{{access_token_unverified}}", "type": "string"}]
+            }
+          }
+        },
+        {
+          "name": "Accounts me \u2014 no bearer (403)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/accounts/me",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "accounts", "me"]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "Accounts me \u2014 invalid JWT (401)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/accounts/me",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "accounts", "me"]
+            },
+            "description": "",
+            "auth": {
+              "type": "bearer",
+              "bearer": [{"key": "token", "value": "invalid.jwt.here", "type": "string"}]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Transactions",
+      "item": [
+        {
+          "name": "Transfer",
+          "item": [
+            {
+              "name": "Transfer \u2014 below threshold no step-up (200)",
+              "request": {
+                "method": "POST",
+                "header": [{"key": "Content-Type", "value": "application/json"}],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/transactions/transfer",
+                  "host": ["{{baseUrl}}"],
+                  "path": ["api", "v1", "transactions", "transfer"]
+                },
+                "description": "Amount below $1000 threshold. No X-Step-Up-Token header needed.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"to_account_number\": \"REPLACE_WITH_RECIPIENT_ACCOUNT_NUMBER\",\n  \"amount\": \"50.00\",\n  \"description\": \"Rent payment\"\n}",
+                  "options": {"raw": {"language": "json"}}
+                },
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [{"key": "token", "value": "{{access_token_verified}}", "type": "string"}]
+                }
+              }
+            },
+            {
+              "name": "Transfer \u2014 above threshold with step-up (200)",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {"key": "Content-Type", "value": "application/json"},
+                  {"key": "X-Step-Up-Token", "value": "{{step_up_token}}"}
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/transactions/transfer",
+                  "host": ["{{baseUrl}}"],
+                  "path": ["api", "v1", "transactions", "transfer"]
+                },
+                "description": "High-value transfer. First call POST /auth/step-up to obtain {{step_up_token}}.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"to_account_number\": \"REPLACE_WITH_RECIPIENT_ACCOUNT_NUMBER\",\n  \"amount\": \"1000.00\"\n}",
+                  "options": {"raw": {"language": "json"}}
+                },
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [{"key": "token", "value": "{{access_token_verified_mfa}}", "type": "string"}]
+                }
+              }
+            },
+            {
+              "name": "Transfer \u2014 above threshold no step-up (403)",
+              "request": {
+                "method": "POST",
+                "header": [{"key": "Content-Type", "value": "application/json"}],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/transactions/transfer",
+                  "host": ["{{baseUrl}}"],
+                  "path": ["api", "v1", "transactions", "transfer"]
+                },
+                "description": "Step-up gate fires before balance check. Missing token always returns 403.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"to_account_number\": \"REPLACE_WITH_RECIPIENT_ACCOUNT_NUMBER\",\n  \"amount\": \"1000.00\"\n}",
+                  "options": {"raw": {"language": "json"}}
+                },
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [{"key": "token", "value": "{{access_token_verified}}", "type": "string"}]
+                }
+              }
+            },
+            {
+              "name": "Transfer \u2014 insufficient balance (400)",
+              "request": {
+                "method": "POST",
+                "header": [{"key": "Content-Type", "value": "application/json"}],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/transactions/transfer",
+                  "host": ["{{baseUrl}}"],
+                  "path": ["api", "v1", "transactions", "transfer"]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"to_account_number\": \"REPLACE_WITH_RECIPIENT_ACCOUNT_NUMBER\",\n  \"amount\": \"99999.00\"\n}",
+                  "options": {"raw": {"language": "json"}}
+                },
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [{"key": "token", "value": "{{access_token_verified}}", "type": "string"}]
+                }
+              }
+            },
+            {
+              "name": "Transfer \u2014 self-transfer (422)",
+              "request": {
+                "method": "POST",
+                "header": [{"key": "Content-Type", "value": "application/json"}],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/transactions/transfer",
+                  "host": ["{{baseUrl}}"],
+                  "path": ["api", "v1", "transactions", "transfer"]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"to_account_number\": \"REPLACE_WITH_OWN_ACCOUNT_NUMBER\",\n  \"amount\": \"10.00\"\n}",
+                  "options": {"raw": {"language": "json"}}
+                },
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [{"key": "token", "value": "{{access_token_verified}}", "type": "string"}]
+                }
+              }
+            },
+            {
+              "name": "Transfer \u2014 destination not found (400)",
+              "request": {
+                "method": "POST",
+                "header": [{"key": "Content-Type", "value": "application/json"}],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/transactions/transfer",
+                  "host": ["{{baseUrl}}"],
+                  "path": ["api", "v1", "transactions", "transfer"]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"to_account_number\": \"000000000000\",\n  \"amount\": \"10.00\"\n}",
+                  "options": {"raw": {"language": "json"}}
+                },
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [{"key": "token", "value": "{{access_token_verified}}", "type": "string"}]
+                }
+              }
+            },
+            {
+              "name": "Transfer \u2014 zero amount (422)",
+              "request": {
+                "method": "POST",
+                "header": [{"key": "Content-Type", "value": "application/json"}],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/transactions/transfer",
+                  "host": ["{{baseUrl}}"],
+                  "path": ["api", "v1", "transactions", "transfer"]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"to_account_number\": \"REPLACE_WITH_RECIPIENT_ACCOUNT_NUMBER\",\n  \"amount\": \"0\"\n}",
+                  "options": {"raw": {"language": "json"}}
+                },
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [{"key": "token", "value": "{{access_token_verified}}", "type": "string"}]
+                }
+              }
+            },
+            {
+              "name": "Transfer \u2014 unverified (403)",
+              "request": {
+                "method": "POST",
+                "header": [{"key": "Content-Type", "value": "application/json"}],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/transactions/transfer",
+                  "host": ["{{baseUrl}}"],
+                  "path": ["api", "v1", "transactions", "transfer"]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"to_account_number\": \"REPLACE_WITH_RECIPIENT_ACCOUNT_NUMBER\",\n  \"amount\": \"10.00\"\n}",
+                  "options": {"raw": {"language": "json"}}
+                },
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [{"key": "token", "value": "{{access_token_unverified}}", "type": "string"}]
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "Transaction history",
+          "item": [
+            {
+              "name": "History \u2014 own transactions (200)",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/transactions/history",
+                  "host": ["{{baseUrl}}"],
+                  "path": ["api", "v1", "transactions", "history"]
+                },
+                "description": "Default pagination (page=1, page_size=50). Returns only own transactions.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [{"key": "token", "value": "{{access_token_verified}}", "type": "string"}]
+                }
+              }
+            },
+            {
+              "name": "History \u2014 custom pagination (200)",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/transactions/history?page=1&page_size=10",
+                  "host": ["{{baseUrl}}"],
+                  "path": ["api", "v1", "transactions", "history"],
+                  "query": [
+                    {"key": "page", "value": "1"},
+                    {"key": "page_size", "value": "10"}
+                  ]
+                },
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [{"key": "token", "value": "{{access_token_verified}}", "type": "string"}]
+                }
+              }
+            },
+            {
+              "name": "History \u2014 page_size too large (422)",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/transactions/history?page_size=200",
+                  "host": ["{{baseUrl}}"],
+                  "path": ["api", "v1", "transactions", "history"],
+                  "query": [
+                    {"key": "page_size", "value": "200"}
+                  ]
+                },
+                "description": "page_size max is 100.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [{"key": "token", "value": "{{access_token_verified}}", "type": "string"}]
+                }
+              }
+            },
+            {
+              "name": "History \u2014 unverified (403)",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/transactions/history",
+                  "host": ["{{baseUrl}}"],
+                  "path": ["api", "v1", "transactions", "history"]
+                },
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [{"key": "token", "value": "{{access_token_unverified}}", "type": "string"}]
+                }
+              }
+            },
+            {
+              "name": "History \u2014 no bearer (403)",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/transactions/history",
+                  "host": ["{{baseUrl}}"],
+                  "path": ["api", "v1", "transactions", "history"]
+                }
+              }
+            }
+          ]
         }
       ]
     }
