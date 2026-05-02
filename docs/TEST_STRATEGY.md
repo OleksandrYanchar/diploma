@@ -358,7 +358,7 @@ Each implementation phase from `IMPLEMENTATION_PLAN.md` has a corresponding set 
 
 ### Phase 2 — Core Authentication
 
-**Verification method:** Integration tests in `tests/test_auth.py` and `tests/test_tokens.py`.
+**Verification method:** Integration tests in `tests/test_auth_register.py`, `tests/test_auth_login.py`, `tests/test_auth_refresh.py`, and `tests/test_auth_logout.py`.
 
 | Test | SR |
 |------|----|
@@ -376,7 +376,7 @@ Each implementation phase from `IMPLEMENTATION_PLAN.md` has a corresponding set 
 
 ### Phase 3 — MFA (TOTP)
 
-**Verification method:** Integration tests in `tests/test_auth.py` (MFA section).
+**Verification method:** Integration tests in `tests/test_auth_mfa.py`.
 
 | Test | SR |
 |------|----|
@@ -390,7 +390,7 @@ Each implementation phase from `IMPLEMENTATION_PLAN.md` has a corresponding set 
 
 ### Phase 4 — Authorization
 
-**Verification method:** Integration tests in `tests/test_rbac.py` and `tests/test_ownership.py`.
+**Verification method:** Integration tests in `tests/test_rbac.py`, `tests/test_accounts.py`, and `tests/test_transfers.py` (ownership and role enforcement).
 
 | Test | SR |
 |------|----|
