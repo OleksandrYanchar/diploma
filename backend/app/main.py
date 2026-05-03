@@ -34,17 +34,8 @@ from app.users.router import router as users_router
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Manage application startup and shutdown lifecycle.
 
-    Startup:
-    - Initialise the PostgreSQL connection pool via SQLAlchemy.
-    - Initialise the Redis connection pool.
-
-    Shutdown:
-    - Gracefully close the Redis connection pool.
-    - Dispose of the PostgreSQL connection pool.
-
-    This is the correct place for one-time initialisation of shared resources.
-    All shared resources are injected via ``Depends()`` in route handlers, not
-    accessed as module-level globals from this function.
+    Initialises the PostgreSQL and Redis connection pools on startup and
+    disposes them on shutdown.
     """
     settings: Settings = get_settings()
 
@@ -60,17 +51,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 
 def create_application() -> FastAPI:
-    """Factory function that creates and configures the FastAPI application.
-
-    Using a factory rather than a module-level ``app`` variable makes it easy
-    for tests to create isolated application instances.
-
-    Returns:
-        A configured ``FastAPI`` application instance.
-    """
+    """Create and configure the FastAPI application."""
     settings: Settings = get_settings()
 
-    # Disable interactive docs in production to reduce the attack surface.
     docs_url: str | None = "/docs" if settings.debug else None
     redoc_url: str | None = "/redoc" if settings.debug else None
 
@@ -84,9 +67,6 @@ def create_application() -> FastAPI:
         lifespan=lifespan,
     )
 
-    # CORS middleware.
-    # In production, ``allowed_origins`` must be locked to the exact frontend
-    # URL.  Wildcard origins are never acceptable for a Zero Trust system.
     application.add_middleware(
         CORSMiddleware,
         allow_origins=settings.allowed_origins,
@@ -95,12 +75,6 @@ def create_application() -> FastAPI:
         allow_headers=["Authorization", "Content-Type", "X-Step-Up-Token"],
     )
 
-    # --- Routers ---
-    # Phase 1: health only.
-    # Phase 2: auth (registration, email verification; login/refresh added later).
-    # Phase 4: users (GET /users/me), admin (GET /admin/ping — RBAC anchor).
-    # Phase 5: accounts (GET /accounts/me with lazy seeding).
-    # Phase 5: transactions (POST /transactions/transfer with step-up gate).
     application.include_router(health_router, prefix="/api/v1")
     application.include_router(auth_router, prefix="/api/v1")
     application.include_router(users_router, prefix="/api/v1")
@@ -111,5 +85,4 @@ def create_application() -> FastAPI:
     return application
 
 
-# Module-level application instance used by Uvicorn.
 app: FastAPI = create_application()

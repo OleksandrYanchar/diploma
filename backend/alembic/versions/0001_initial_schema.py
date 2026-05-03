@@ -24,8 +24,9 @@ from __future__ import annotations
 from typing import Sequence, Union
 
 import sqlalchemy as sa
-from alembic import op
 from sqlalchemy.dialects import postgresql
+
+from alembic import op
 
 revision: str = "0001"
 down_revision: Union[str, None] = None
@@ -36,40 +37,45 @@ depends_on: Union[str, Sequence[str], None] = None
 def upgrade() -> None:
     """Create all tables and enum types."""
 
-    # ------------------------------------------------------------------
     # Enum types
-    # ------------------------------------------------------------------
     userrole_enum = postgresql.ENUM(
-        "user", "auditor", "admin",
+        "user",
+        "auditor",
+        "admin",
         name="userrole",
         create_type=False,
     )
     userrole_enum.create(op.get_bind(), checkfirst=True)
 
     transactiontype_enum = postgresql.ENUM(
-        "transfer", "deposit", "withdrawal",
+        "transfer",
+        "deposit",
+        "withdrawal",
         name="transactiontype",
         create_type=False,
     )
     transactiontype_enum.create(op.get_bind(), checkfirst=True)
 
     transactionstatus_enum = postgresql.ENUM(
-        "pending", "completed", "failed",
+        "pending",
+        "completed",
+        "failed",
         name="transactionstatus",
         create_type=False,
     )
     transactionstatus_enum.create(op.get_bind(), checkfirst=True)
 
     severity_enum = postgresql.ENUM(
-        "LOW", "MEDIUM", "HIGH", "CRITICAL",
+        "LOW",
+        "MEDIUM",
+        "HIGH",
+        "CRITICAL",
         name="severity",
         create_type=False,
     )
     severity_enum.create(op.get_bind(), checkfirst=True)
 
-    # ------------------------------------------------------------------
     # users
-    # ------------------------------------------------------------------
     op.create_table(
         "users",
         sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
@@ -77,14 +83,22 @@ def upgrade() -> None:
         sa.Column("hashed_password", sa.String(1024), nullable=False),
         sa.Column(
             "role",
-            postgresql.ENUM("user", "auditor", "admin", name="userrole", create_type=False),
+            postgresql.ENUM(
+                "user", "auditor", "admin", name="userrole", create_type=False
+            ),
             nullable=False,
         ),
         sa.Column("is_active", sa.Boolean(), nullable=False, server_default=sa.true()),
-        sa.Column("is_verified", sa.Boolean(), nullable=False, server_default=sa.false()),
-        sa.Column("mfa_enabled", sa.Boolean(), nullable=False, server_default=sa.false()),
+        sa.Column(
+            "is_verified", sa.Boolean(), nullable=False, server_default=sa.false()
+        ),
+        sa.Column(
+            "mfa_enabled", sa.Boolean(), nullable=False, server_default=sa.false()
+        ),
         sa.Column("mfa_secret", sa.String(64), nullable=True),
-        sa.Column("failed_login_count", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column(
+            "failed_login_count", sa.Integer(), nullable=False, server_default="0"
+        ),
         sa.Column("locked_until", sa.DateTime(timezone=True), nullable=True),
         sa.Column(
             "created_at",
@@ -102,9 +116,7 @@ def upgrade() -> None:
     )
     op.create_index("ix_users_email", "users", ["email"], unique=True)
 
-    # ------------------------------------------------------------------
     # accounts
-    # ------------------------------------------------------------------
     op.create_table(
         "accounts",
         sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
@@ -133,9 +145,7 @@ def upgrade() -> None:
     )
     op.create_index("ix_accounts_user_id", "accounts", ["user_id"])
 
-    # ------------------------------------------------------------------
     # transactions
-    # ------------------------------------------------------------------
     op.create_table(
         "transactions",
         sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
@@ -145,7 +155,9 @@ def upgrade() -> None:
         sa.Column(
             "transaction_type",
             postgresql.ENUM(
-                "transfer", "deposit", "withdrawal",
+                "transfer",
+                "deposit",
+                "withdrawal",
                 name="transactiontype",
                 create_type=False,
             ),
@@ -154,7 +166,9 @@ def upgrade() -> None:
         sa.Column(
             "status",
             postgresql.ENUM(
-                "pending", "completed", "failed",
+                "pending",
+                "completed",
+                "failed",
                 name="transactionstatus",
                 create_type=False,
             ),
@@ -176,12 +190,12 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("id"),
     )
-    op.create_index("ix_transactions_from_account_id", "transactions", ["from_account_id"])
+    op.create_index(
+        "ix_transactions_from_account_id", "transactions", ["from_account_id"]
+    )
     op.create_index("ix_transactions_to_account_id", "transactions", ["to_account_id"])
 
-    # ------------------------------------------------------------------
     # refresh_tokens
-    # ------------------------------------------------------------------
     op.create_table(
         "refresh_tokens",
         sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
@@ -199,13 +213,13 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
     )
-    op.create_index("ix_refresh_tokens_token_hash", "refresh_tokens", ["token_hash"], unique=True)
+    op.create_index(
+        "ix_refresh_tokens_token_hash", "refresh_tokens", ["token_hash"], unique=True
+    )
     op.create_index("ix_refresh_tokens_user_id", "refresh_tokens", ["user_id"])
     op.create_index("ix_refresh_tokens_session_id", "refresh_tokens", ["session_id"])
 
-    # ------------------------------------------------------------------
     # audit_logs
-    # ------------------------------------------------------------------
     op.create_table(
         "audit_logs",
         sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
@@ -227,9 +241,7 @@ def upgrade() -> None:
     op.create_index("ix_audit_logs_action", "audit_logs", ["action"])
     op.create_index("ix_audit_logs_created_at", "audit_logs", ["created_at"])
 
-    # ------------------------------------------------------------------
     # security_events
-    # ------------------------------------------------------------------
     op.create_table(
         "security_events",
         sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
@@ -238,7 +250,10 @@ def upgrade() -> None:
         sa.Column(
             "severity",
             postgresql.ENUM(
-                "LOW", "MEDIUM", "HIGH", "CRITICAL",
+                "LOW",
+                "MEDIUM",
+                "HIGH",
+                "CRITICAL",
                 name="severity",
                 create_type=False,
             ),

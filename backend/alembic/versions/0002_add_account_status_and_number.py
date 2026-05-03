@@ -22,8 +22,9 @@ import secrets
 from typing import Sequence, Union
 
 import sqlalchemy as sa
-from alembic import op
 from sqlalchemy.dialects import postgresql
+
+from alembic import op
 
 revision: str = "0002"
 down_revision: Union[str, None] = "0001"
@@ -35,7 +36,9 @@ def upgrade() -> None:
     """Add accountstatus enum, account_number column, and status column."""
 
     accountstatus_enum = postgresql.ENUM(
-        "ACTIVE", "INACTIVE", "FROZEN",
+        "ACTIVE",
+        "INACTIVE",
+        "FROZEN",
         name="accountstatus",
         create_type=False,
     )
@@ -54,7 +57,9 @@ def upgrade() -> None:
         "accounts",
         sa.Column(
             "status",
-            postgresql.ENUM("ACTIVE", "INACTIVE", "FROZEN", name="accountstatus", create_type=False),
+            postgresql.ENUM(
+                "ACTIVE", "INACTIVE", "FROZEN", name="accountstatus", create_type=False
+            ),
             nullable=True,
         ),
     )
@@ -75,7 +80,9 @@ def upgrade() -> None:
     op.alter_column("accounts", "account_number", nullable=False)
     op.alter_column("accounts", "status", nullable=False)
 
-    op.create_index("ix_accounts_account_number", "accounts", ["account_number"], unique=True)
+    op.create_index(
+        "ix_accounts_account_number", "accounts", ["account_number"], unique=True
+    )
 
 
 def downgrade() -> None:

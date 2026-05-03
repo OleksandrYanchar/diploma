@@ -34,9 +34,7 @@ from app.models.security_event import SecurityEvent, Severity
 from tests.conftest import _TEST_SETTINGS
 from tests.helpers import make_orm_user, register_verify_login
 
-# ---------------------------------------------------------------------------
 # URL constants
-# ---------------------------------------------------------------------------
 
 _LOGIN_URL = "/api/v1/auth/login"
 _REGISTER_URL = "/api/v1/auth/register"
@@ -46,10 +44,7 @@ _TRANSFER_URL = "/api/v1/transactions/transfer"
 
 _STRONG_PASSWORD = "StrongPass1!"
 
-
-# ---------------------------------------------------------------------------
 # Shared helpers
-# ---------------------------------------------------------------------------
 
 
 async def _register_and_verify(
@@ -91,9 +86,7 @@ async def _make_account(
     return account
 
 
-# ---------------------------------------------------------------------------
 # Event 1: ACCOUNT_LOCKED (severity=HIGH)
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -181,9 +174,7 @@ async def test_account_locked_creates_high_security_event(
     assert "locked_until" in locked_audit.details
 
 
-# ---------------------------------------------------------------------------
 # Event 2: TOKEN_REUSE (severity=CRITICAL) — T-20
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -211,7 +202,6 @@ async def test_token_reuse_creates_critical_security_event(
     )
     user_id = uuid.UUID(user_id_str)
 
-    # Step 2: Successful rotation — refresh_token_1 is now revoked.
     rotate_resp = await async_client.post(
         _REFRESH_URL,
         json={"refresh_token": refresh_token_1},
@@ -228,14 +218,12 @@ async def test_token_reuse_creates_critical_security_event(
     assert revoked_row is not None
     assert revoked_row.revoked is True, "Token must be revoked after rotation"
 
-    # Step 3: Re-present the revoked token → reuse detection → 401.
     reuse_resp = await async_client.post(
         _REFRESH_URL,
         json={"refresh_token": refresh_token_1},
     )
     assert reuse_resp.status_code == 401
 
-    # Step 4: Assert the CRITICAL SecurityEvent row.
     # ADR-18: scope by both event_type and user_id.
     se_result = await db_session.execute(
         select(SecurityEvent).where(
@@ -269,9 +257,7 @@ async def test_token_reuse_creates_critical_security_event(
     ), "TOKEN_REFRESHED AuditLog row must still exist (SR-16 regression guard)"
 
 
-# ---------------------------------------------------------------------------
 # Event 3: STEP_UP_BYPASS_ATTEMPT (severity=HIGH)
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -376,9 +362,7 @@ async def test_step_up_bypass_attempt_creates_security_event(
     assert audit_entry.details.get("token_sub") == str(user_a.id)
 
 
-# ---------------------------------------------------------------------------
 # Event 4: STEP_UP_BYPASS_ATTEMPT via require_step_up dependency (severity=HIGH)
-# ---------------------------------------------------------------------------
 
 # The test route /api/v1/test/step-up-check is registered by test_require_step_up
 # at module import time.  pytest collects that module before running tests in this

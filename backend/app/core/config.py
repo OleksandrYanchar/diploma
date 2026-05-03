@@ -41,14 +41,6 @@ class _CommaListEnvSource(EnvSettingsSource):
         is a plain comma-separated string it is split and returned as a list.
         JSON-encoded values (starting with ``[`` or ``{``) are passed to the
         standard JSON decoder as normal.
-
-        Args:
-            field_name: Name of the settings field being decoded.
-            field: Pydantic ``FieldInfo`` for the field.
-            value: Raw string value from the environment.
-
-        Returns:
-            A Python object decoded from the raw string.
         """
         if isinstance(value, str):
             stripped = value.strip()
@@ -73,15 +65,7 @@ class Settings(BaseSettings):
     """
 
     model_config = SettingsConfigDict(
-        # Search for .env in the backend/ directory first, then one level up
-        # (the repo root).  This means:
-        #   - Inside Docker (WORKDIR /backend): finds /backend/.env if present,
-        #     otherwise the env vars injected by Compose are already in the
-        #     process environment and no file is needed.
-        #   - Local development: finds backend/.env or the root .env — a single
-        #     file at the repo root covers both docker-compose and local tooling.
-        # Variables already present in the process environment always take
-        # precedence over the file, so Docker Compose injected vars win.
+        # .env lookup: backend/.env first, then repo root. Process env always wins.
         env_file=(".env", "../.env"),
         env_file_encoding="utf-8",
         # Ignore unknown environment variables (many will be present in Docker).
@@ -89,9 +73,7 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
-    # ------------------------------------------------------------------
     # Application
-    # ------------------------------------------------------------------
     app_name: str = Field(
         default="Zero Trust Financial API",
         description="Human-readable application name",
@@ -106,12 +88,7 @@ class Settings(BaseSettings):
         description="Runtime environment: development | production | test",
     )
 
-    # ------------------------------------------------------------------
-    # PostgreSQL — component variables
-    #
-    # Used by docker-compose for the postgres service AND to construct
-    # DATABASE_URL when it is not provided directly (e.g. local Alembic runs).
-    # ------------------------------------------------------------------
+    # PostgreSQL
     postgres_user: str | None = Field(default=None, description="PostgreSQL user name.")
     postgres_password: str | None = Field(
         default=None, description="PostgreSQL password."
@@ -132,9 +109,7 @@ class Settings(BaseSettings):
         ),
     )
 
-    # ------------------------------------------------------------------
-    # Redis — component variables
-    # ------------------------------------------------------------------
+    # Redis
     redis_password: str | None = Field(default=None, description="Redis password.")
     redis_host: str = Field(default="localhost", description="Redis host.")
     redis_port: int = Field(default=6379, description="Redis port.")
@@ -148,9 +123,7 @@ class Settings(BaseSettings):
         ),
     )
 
-    # ------------------------------------------------------------------
     # JWT / Token settings
-    # ------------------------------------------------------------------
     jwt_secret_key: str = Field(
         description=(
             "HMAC secret for signing JWT access tokens.  "
@@ -184,9 +157,7 @@ class Settings(BaseSettings):
         description="Step-up token lifetime in minutes. Maximum 10 per SR-13.",
     )
 
-    # ------------------------------------------------------------------
-    # Security policy parameters
-    # ------------------------------------------------------------------
+    # Security policy
     # SR-05: account lockout after N consecutive failed logins
     max_failed_login_attempts: int = Field(
         default=5,
@@ -226,9 +197,7 @@ class Settings(BaseSettings):
         ),
     )
 
-    # ------------------------------------------------------------------
-    # CORS (used by FastAPI middleware in later phases)
-    # ------------------------------------------------------------------
+    # CORS
     allowed_origins: list[str] = Field(
         default=["http://localhost:3000"],
         description=(
@@ -237,9 +206,7 @@ class Settings(BaseSettings):
         ),
     )
 
-    # ------------------------------------------------------------------
     # Validators
-    # ------------------------------------------------------------------
     @model_validator(mode="before")
     @classmethod
     def build_connection_urls(cls, data: Any) -> Any:
@@ -253,13 +220,6 @@ class Settings(BaseSettings):
         This means .env only needs POSTGRES_USER / POSTGRES_PASSWORD /
         POSTGRES_DB / REDIS_PASSWORD — the full connection strings are derived
         automatically, both locally and inside Docker.
-
-        Args:
-            data: Raw merged settings dict from all pydantic-settings sources.
-
-        Returns:
-            The same dict, with ``database_url`` and/or ``redis_url`` added
-            when they were absent and the required components were present.
 
         Raises:
             ValueError: If neither the full URL nor all required component
@@ -331,14 +291,7 @@ class Settings(BaseSettings):
         before field validators run.  A comma-separated ``ALLOWED_ORIGINS``
         string (the natural format for .env and docker-compose files) is not
         valid JSON, so the default source raises ``SettingsError`` at startup.
-
-        By substituting ``_CommaListEnvSource`` for the built-in
-        ``EnvSettingsSource``, both comma-separated and JSON-array formats are
-        accepted without changing .env syntax.
-
-        Returns:
-            A tuple of settings sources in precedence order:
-            init values > env vars (comma-list-aware) > .env file > defaults.
+        Substituting ``_CommaListEnvSource`` accepts both formats.
         """
         sources = super().settings_customise_sources(settings_cls, **kwargs)
         return tuple(

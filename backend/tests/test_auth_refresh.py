@@ -45,9 +45,7 @@ async def _test_protected_refresh(
     return {"user_id": str(current_user.id)}
 
 
-# ---------------------------------------------------------------------------
 # Tests
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -152,7 +150,6 @@ async def test_refresh_reuse_detection_revokes_session(
         async_client, capsys, email
     )
 
-    # Step 2: successful rotation.
     rotate_resp = await async_client.post(
         _REFRESH_URL,
         json={"refresh_token": refresh_token_1},
@@ -174,14 +171,12 @@ async def test_refresh_reuse_detection_revokes_session(
     session_before = await fake_redis.get(f"session:{new_session_id}")  # type: ignore[union-attr]
     assert session_before is not None, "New session must exist before reuse detection"
 
-    # Step 3: replay the original refresh token → reuse detection.
     reuse_resp = await async_client.post(
         _REFRESH_URL,
         json={"refresh_token": refresh_token_1},
     )
     assert reuse_resp.status_code == 401
 
-    # Step 4: the new session's Redis key must now be gone (SR-08).
     session_after = await fake_redis.get(f"session:{new_session_id}")  # type: ignore[union-attr]
     assert session_after is None, "Redis session must be deleted after reuse detection"
 
