@@ -942,37 +942,8 @@ class VerificationRunner:
                 expected=403,
             )
 
-        # MFA disable with wrong password
-        await self._req(
-            "POST", "/auth/mfa/disable",
-            flow="mfa", branch="disable_wrong_password",
-            name="MFA disable wrong password → 401",
-            json_body={"password": "WrongPassword999!", "totp_code": totp.now()},
-            headers=auth_h,
-            expected=401,
-        )
-        # MFA disable with invalid TOTP
-        await self._req(
-            "POST", "/auth/mfa/disable",
-            flow="mfa", branch="disable_invalid_totp",
-            name="MFA disable invalid TOTP code → 401",
-            json_body={"password": "StrongPass1!", "totp_code": "000000"},
-            headers=auth_h,
-            expected=401,
-        )
-        # MFA disable valid
-        r_disable, _ = await self._req(
-            "POST", "/auth/mfa/disable",
-            flow="mfa", branch="disable_valid",
-            name="MFA disable with correct password + TOTP → 200",
-            json_body={"password": "StrongPass1!", "totp_code": totp.now()},
-            headers=auth_h,
-            expected=200,
-        )
-        # MFA is now disabled — step-up transfer scenarios cannot run for this user.
-        # Mark as unavailable so the transfers section blocks cleanly instead of failing.
-        if r_disable.result == RESULT_PASS:
-            ctx["mfa_available"] = False
+        # MFA disable tests are deferred to _run_accounts_and_transfers so the
+        # MFA user remains active for step-up transfer scenarios.
 
         return ctx
 
@@ -1333,6 +1304,34 @@ class VerificationRunner:
                         headers={**auth_mfa, "X-Step-Up-Token": ctx["access_a"]},
                         expected=403,
                     )
+
+            # ── MFA disable lifecycle (deferred from _run_mfa) ───────────────
+            # Runs after step-up transfers so the MFA user is still active above.
+            print("\n─── MFA Disable ──────────────────────────────────────────────")
+            await self._req(
+                "POST", "/auth/mfa/disable",
+                flow="mfa", branch="disable_wrong_password",
+                name="MFA disable wrong password → 401",
+                json_body={"password": "WrongPassword999!", "totp_code": totp.now()},
+                headers=auth_mfa,
+                expected=401,
+            )
+            await self._req(
+                "POST", "/auth/mfa/disable",
+                flow="mfa", branch="disable_invalid_totp",
+                name="MFA disable invalid TOTP code → 401",
+                json_body={"password": "StrongPass1!", "totp_code": "000000"},
+                headers=auth_mfa,
+                expected=401,
+            )
+            await self._req(
+                "POST", "/auth/mfa/disable",
+                flow="mfa", branch="disable_valid",
+                name="MFA disable with correct password + TOTP → 200",
+                json_body={"password": "StrongPass1!", "totp_code": totp.now()},
+                headers=auth_mfa,
+                expected=200,
+            )
         else:
             self._blocked("transfers", "step_up_transfers", "all step-up transfer scenarios",
                           "MFA user not available — set up MFA first")
