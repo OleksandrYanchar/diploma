@@ -98,6 +98,8 @@ def promote_to_admin(
     pg_password: str,
     pg_db: str,
 ) -> bool:
+    if not isinstance(email, str) or any(c in email for c in ("'", ";", "--")):
+        raise ValueError(f"Unsafe email value for admin promotion: {email!r}")
     out = psql_exec(
         f"UPDATE users SET role='admin' WHERE email='{email}';",
         pg_user,
@@ -114,6 +116,10 @@ def set_account_status(
     pg_password: str,
     pg_db: str,
 ) -> bool:
+    if status not in {"ACTIVE", "INACTIVE", "FROZEN"}:
+        raise ValueError(f"Invalid status: {status!r}")
+    if not isinstance(account_number, str) or any(c in account_number for c in ("'", ";", "--")):
+        raise ValueError(f"Unsafe account_number: {account_number!r}")
     out = psql_exec(
         f"UPDATE accounts SET status='{status}' WHERE account_number='{account_number}';",
         pg_user,
@@ -130,6 +136,8 @@ def set_account_balance(
     pg_password: str,
     pg_db: str,
 ) -> bool:
+    if not isinstance(account_number, str) or any(c in account_number for c in ("'", ";", "--")):
+        raise ValueError(f"Unsafe account_number: {account_number!r}")
     out = psql_exec(
         f"UPDATE accounts SET balance={balance} WHERE account_number='{account_number}';",
         pg_user,

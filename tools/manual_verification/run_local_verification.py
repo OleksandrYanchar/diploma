@@ -19,9 +19,9 @@ Flags:
 Docker note:
     The default --base-url is http://localhost:8000 (direct backend, no rate
     limits). This requires port 8000 to be exposed. The repo includes
-    docker-compose.test-override.yml for this. Start the stack with:
+    docker-compose.test.yml for this. Start the stack with:
 
-        docker compose -f docker-compose.yml -f docker-compose.test-override.yml up -d
+        docker compose -f docker-compose.test.yml up -d
 
     Or just:
         docker compose up -d
@@ -942,37 +942,8 @@ class VerificationRunner:
                 expected=403,
             )
 
-        # MFA disable with wrong password
-        await self._req(
-            "POST", "/auth/mfa/disable",
-            flow="mfa", branch="disable_wrong_password",
-            name="MFA disable wrong password → 401",
-            json_body={"password": "WrongPassword999!", "totp_code": totp.now()},
-            headers=auth_h,
-            expected=401,
-        )
-        # MFA disable with invalid TOTP
-        await self._req(
-            "POST", "/auth/mfa/disable",
-            flow="mfa", branch="disable_invalid_totp",
-            name="MFA disable invalid TOTP code → 401",
-            json_body={"password": "StrongPass1!", "totp_code": "000000"},
-            headers=auth_h,
-            expected=401,
-        )
-        # MFA disable valid
-        r_disable, _ = await self._req(
-            "POST", "/auth/mfa/disable",
-            flow="mfa", branch="disable_valid",
-            name="MFA disable with correct password + TOTP → 200",
-            json_body={"password": "StrongPass1!", "totp_code": totp.now()},
-            headers=auth_h,
-            expected=200,
-        )
-        # MFA is now disabled — step-up transfer scenarios cannot run for this user.
-        # Mark as unavailable so the transfers section blocks cleanly instead of failing.
-        if r_disable.result == RESULT_PASS:
-            ctx["mfa_available"] = False
+        # MFA disable tests are deferred to _run_accounts_and_transfers so the
+        # MFA user remains active for step-up transfer scenarios.
 
         return ctx
 
@@ -1333,6 +1304,34 @@ class VerificationRunner:
                         headers={**auth_mfa, "X-Step-Up-Token": ctx["access_a"]},
                         expected=403,
                     )
+
+            # ── MFA disable lifecycle (deferred from _run_mfa) ───────────────
+            # Runs after step-up transfers so the MFA user is still active above.
+            print("\n─── MFA Disable ──────────────────────────────────────────────")
+            await self._req(
+                "POST", "/auth/mfa/disable",
+                flow="mfa", branch="disable_wrong_password",
+                name="MFA disable wrong password → 401",
+                json_body={"password": "WrongPassword999!", "totp_code": totp.now()},
+                headers=auth_mfa,
+                expected=401,
+            )
+            await self._req(
+                "POST", "/auth/mfa/disable",
+                flow="mfa", branch="disable_invalid_totp",
+                name="MFA disable invalid TOTP code → 401",
+                json_body={"password": "StrongPass1!", "totp_code": "000000"},
+                headers=auth_mfa,
+                expected=401,
+            )
+            await self._req(
+                "POST", "/auth/mfa/disable",
+                flow="mfa", branch="disable_valid",
+                name="MFA disable with correct password + TOTP → 200",
+                json_body={"password": "StrongPass1!", "totp_code": totp.now()},
+                headers=auth_mfa,
+                expected=200,
+            )
         else:
             self._blocked("transfers", "step_up_transfers", "all step-up transfer scenarios",
                           "MFA user not available — set up MFA first")
@@ -1506,13 +1505,13 @@ class VerificationRunner:
             ## Docker startup commands used
 
             ```bash
-            # Start stack (requires docker-compose.test-override.yml for port 8000):
-            docker compose -f docker-compose.yml -f docker-compose.test-override.yml up -d
+            # Start stack (test stack, PostgreSQL on 5434, Redis on 6380, backend on 8000):
+            docker compose -f docker-compose.test.yml up -d
             # Or through nginx:
             docker compose up -d
 
             # Apply migrations:
-            docker exec diploma-backend-1 alembic upgrade head
+            docker exec diploma-test-backend-1 alembic upgrade head
             ```
 
             ## Failures
@@ -1552,8 +1551,8 @@ def print_startup_instructions() -> None:
 
         Option A — expose backend directly on port 8000 (recommended, no rate limits):
             cd /path/to/diploma
-            docker compose -f docker-compose.yml -f docker-compose.test-override.yml up -d
-            docker exec diploma-backend-1 alembic upgrade head
+            docker compose -f docker-compose.test.yml up -d
+            docker exec diploma-test-backend-1 alembic upgrade head
 
         Option B — through nginx on port 80 (rate limits apply):
             cd /path/to/diploma
@@ -1607,9 +1606,8 @@ def main() -> None:
     # Optionally start Docker
     if args.start_docker:
         print("\nStarting Docker stack…")
-        compose_file = _REPO_ROOT / "docker-compose.yml"
-        override_file = _REPO_ROOT / "docker-compose.test-override.yml"
-        ok, log = start_docker_stack(compose_file, override_file)
+        compose_file = _REPO_ROOT / "docker-compose.test.yml"
+        ok, log = start_docker_stack(compose_file)
         if not ok:
             print(f"Docker startup failed:\n{log}")
             sys.exit(1)
