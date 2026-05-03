@@ -26,7 +26,7 @@ Security notes:
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Header, Query
+from fastapi import APIRouter, Depends, Header, Query, Request
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -52,7 +52,8 @@ router = APIRouter(prefix="/transactions", tags=["transactions"])
     summary="Execute a fund transfer between two accounts",
 )
 async def transfer(
-    request: TransferRequest,
+    body: TransferRequest,
+    http_request: Request,
     current_user: User = Depends(get_current_user),
     _verified: None = Depends(require_verified),
     x_step_up_token: str | None = Header(default=None, alias="X-Step-Up-Token"),
@@ -72,9 +73,15 @@ async def transfer(
     (SR-12).  The destination is resolved by public ``account_number`` to
     prevent IDOR enumeration (T-02).
 
+    IP address and user agent are extracted from the Nginx-forwarded headers
+    (``X-Real-IP``, ``User-Agent``) and passed as plain strings to the service
+    layer for audit log capture (SR-16).
+
     Args:
-        request:         Validated ``TransferRequest`` (destination, amount,
+        body:            Validated ``TransferRequest`` (destination, amount,
                          description).
+        http_request:    FastAPI ``Request`` object used to extract IP and UA
+                         headers for audit log capture (SR-16).
         current_user:    Authenticated User from the Zero Trust gate.
         _verified:       Side-effect dependency that raises 403 if the user's
                          email is not verified (SR-03).
@@ -94,13 +101,19 @@ async def transfer(
             invalid / expired / already consumed (when amount >= threshold).
         HTTPException 422: Self-transfer attempt, or invalid request body.
     """
+    ip_address = http_request.headers.get("X-Real-IP") or (
+        http_request.client.host if http_request.client else None
+    )
+    user_agent = http_request.headers.get("User-Agent")
     transaction = await execute_transfer(
         current_user=current_user,
-        request=request,
+        request=body,
         x_step_up_token=x_step_up_token,
         db=db,
         redis=redis,
         settings=settings,
+        ip_address=ip_address,
+        user_agent=user_agent,
     )
     return TransactionResponse.model_validate(transaction)
 
@@ -112,6 +125,7 @@ async def transfer(
     summary="Retrieve the authenticated user's paginated transaction history",
 )
 async def get_history(
+    http_request: Request,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
     current_user: User = Depends(get_current_user),
@@ -131,7 +145,13 @@ async def get_history(
     A TRANSACTIONS_VIEWED audit log entry is written on every successful
     request, including requests that return an empty list (SR-16).
 
+    IP address and user agent are extracted from the Nginx-forwarded headers
+    (``X-Real-IP``, ``User-Agent``) and passed as plain strings to the service
+    layer for audit log capture (SR-16).
+
     Args:
+        http_request: FastAPI ``Request`` object used to extract IP and UA
+                      headers for audit log capture (SR-16).
         page:         Requested page number (default 1, minimum 1).
         page_size:    Rows per page (default 20, range 1–100).
         current_user: Authenticated User from the Zero Trust gate.
@@ -147,9 +167,15 @@ async def get_history(
         HTTPException 401/403: No valid bearer token, or email not verified.
         HTTPException 422:     ``page`` < 1 or ``page_size`` outside 1–100.
     """
+    ip_address = http_request.headers.get("X-Real-IP") or (
+        http_request.client.host if http_request.client else None
+    )
+    user_agent = http_request.headers.get("User-Agent")
     return await get_transaction_history(
         current_user=current_user,
         db=db,
         page=page,
         page_size=page_size,
+        ip_address=ip_address,
+        user_agent=user_agent,
     )

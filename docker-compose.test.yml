@@ -1,0 +1,71 @@
+services:
+
+  postgres-test:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: testuser
+      POSTGRES_PASSWORD: testpassword
+      POSTGRES_DB: testdb
+    # Exposed on 5434 so DBeaver can connect while the stack is up.
+    ports:
+      - "127.0.0.1:5434:5432"
+    # tmpfs — all data lives in RAM, nothing written to disk, gone on stop.
+    tmpfs:
+      - /var/lib/postgresql/data
+    networks:
+      - test_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U testuser -d testdb"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  redis-test:
+    image: redis:7-alpine
+    command: redis-server --requirepass testredispass
+    # Exposed on 6380 so pytest on the host can reach it directly.
+    ports:
+      - "127.0.0.1:6380:6379"
+    tmpfs:
+      - /data
+    networks:
+      - test_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "testredispass", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 3s
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://testuser:testpassword@postgres-test:5432/testdb
+      REDIS_URL: redis://:testredispass@redis-test:6379/0
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-15}
+      REFRESH_TOKEN_EXPIRE_DAYS: ${REFRESH_TOKEN_EXPIRE_DAYS:-7}
+      STEP_UP_TOKEN_EXPIRE_MINUTES: ${STEP_UP_TOKEN_EXPIRE_MINUTES:-5}
+      MAX_FAILED_LOGIN_ATTEMPTS: ${MAX_FAILED_LOGIN_ATTEMPTS:-5}
+      ACCOUNT_LOCKOUT_MINUTES: ${ACCOUNT_LOCKOUT_MINUTES:-30}
+      STEP_UP_TRANSFER_THRESHOLD: ${STEP_UP_TRANSFER_THRESHOLD:-100000}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost}
+      DEBUG: "true"
+      ENVIRONMENT: "development"
+    depends_on:
+      postgres-test:
+        condition: service_healthy
+      redis-test:
+        condition: service_healthy
+    networks:
+      - test_net
+
+networks:
+  test_net:
+    driver: bridge

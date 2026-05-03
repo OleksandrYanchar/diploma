@@ -20,8 +20,6 @@ from __future__ import annotations
 # ---------------------------------------------------------------------------
 import os
 
-# Provide all required Settings fields that have no defaults.  These values
-# are test-only and have no security significance.
 os.environ.setdefault(
     "DATABASE_URL", "postgresql+asyncpg://test:test@localhost:5432/test"
 )
@@ -31,10 +29,6 @@ os.environ.setdefault(
     "test-secret-key-that-is-at-least-32-chars-long-for-hs256",
 )
 os.environ.setdefault("ENVIRONMENT", "test")
-# Prevent pydantic-settings from reading ALLOWED_ORIGINS from a local .env
-# file that may contain a comma-separated value (e.g. http://localhost,http://localhost:3000).
-# The comma-separated format is now handled by _CommaListEnvSource, but setting
-# this default here avoids any .env file being loaded during tests at all.
 os.environ.setdefault("ALLOWED_ORIGINS", "http://testserver")
 
 from collections.abc import AsyncGenerator  # noqa: E402
@@ -58,11 +52,6 @@ from app.models.user import User, UserRole  # noqa: E402
 # ---------------------------------------------------------------------------
 # Settings override
 # ---------------------------------------------------------------------------
-# These are the values injected whenever a route handler declares
-# ``settings: Settings = Depends(get_settings)``.  Constructing Settings
-# explicitly (not relying on env_file) guarantees isolation: test runs are
-# never affected by a developer's local .env.
-# ---------------------------------------------------------------------------
 _TEST_SETTINGS = Settings(
     database_url="postgresql+asyncpg://test:test@localhost:5432/test",  # type: ignore[arg-type]
     redis_url="redis://:testpass@localhost:6379/0",  # type: ignore[arg-type]
@@ -72,14 +61,7 @@ _TEST_SETTINGS = Settings(
 )
 
 # ---------------------------------------------------------------------------
-# SQLite engine for tests
-# ---------------------------------------------------------------------------
-# SQLite with aiosqlite is used instead of PostgreSQL so that the test suite
-# runs without any external services.  The in-memory URL ensures each test
-# session starts from a completely empty database.
-#
-# check_same_thread=False is required for SQLite when used with async drivers
-# because SQLAlchemy may access the connection from different coroutines.
+# SQLite in-memory engine
 # ---------------------------------------------------------------------------
 _SQLITE_FILE = os.environ.get("TEST_SQLITE_FILE")
 _SQLITE_URL = (
@@ -106,20 +88,12 @@ _TestSessionFactory = async_sessionmaker(
 # ---------------------------------------------------------------------------
 # Session-scoped table setup
 # ---------------------------------------------------------------------------
-# Tables are created once per test session (not per test function) because
-# creating/dropping schema is expensive and the fixture provides isolation
-# through transaction rollback (see db_session below).
-# ---------------------------------------------------------------------------
 @pytest.fixture(scope="session", autouse=True)
 async def create_tables() -> AsyncGenerator[None, None]:
     """Create all ORM-defined tables in the SQLite test database.
 
     Runs once for the entire test session before any test executes.
     All tables are dropped after the session ends, leaving no artefacts.
-
-    This fixture does NOT call ``init_db()`` — the application's startup
-    function is intentionally bypassed because the dependency override for
-    ``get_db`` replaces it entirely.
     """
     async with _test_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -140,12 +114,11 @@ async def create_tables() -> AsyncGenerator[None, None]:
 async def db_session() -> AsyncGenerator[AsyncSession, None]:
     """Yield an isolated AsyncSession for a single test.
 
-    Uses a savepoint strategy: the session begins a transaction before the
-    test and rolls it back afterwards, ensuring that no data written during
+    Uses a rollback after each test to ensure that no data written during
     one test is visible to another.
 
     Security note: isolation prevents test-order dependencies that could mask
-    security bugs (e.g., a leftover locked account affecting subsequent tests).
+    security bugs (e.g. a leftover locked account affecting subsequent tests).
     """
     async with _TestSessionFactory() as session:
         yield session
@@ -153,39 +126,14 @@ async def db_session() -> AsyncGenerator[AsyncSession, None]:
 
 
 # ---------------------------------------------------------------------------
-# Dependency overrides
-# ---------------------------------------------------------------------------
-def _override_get_db_factory(session: AsyncSession):  # type: ignore[return]
-    """Return a FastAPI dependency override that yields the provided session.
-
-    Args:
-        session: The test ``AsyncSession`` to be yielded by the dependency.
-
-    Returns:
-        An async generator function compatible with FastAPI's ``Depends()``.
-    """
-
-    async def _override() -> AsyncGenerator[AsyncSession, None]:
-        """Yield the test database session in place of the real ``get_db``."""
-        yield session
-
-    return _override
-
-
-# ---------------------------------------------------------------------------
 # FakeRedis fixture
 # ---------------------------------------------------------------------------
 @pytest.fixture()
 async def fake_redis() -> AsyncGenerator[fakeredis.FakeRedis, None]:
-    """Yield an in-process FakeRedis instance for a single test.
+    """Yield a fresh in-process FakeRedis instance for a single test.
 
-    The FakeRedis instance is created fresh per test so that Redis state
-    (blacklisted tokens, rate-limit counters, session records) does not
-    leak between tests.
-
-    This fixture does NOT call ``init_redis()`` — the application's Redis
-    startup is bypassed via the ``get_redis`` dependency override registered
-    in ``async_client``.
+    Created fresh per test so that Redis state (blacklisted tokens,
+    rate-limit counters, session records) does not leak between tests.
     """
     redis = fakeredis.FakeRedis(decode_responses=True)
     yield redis
@@ -205,71 +153,47 @@ async def async_client(
     Dependency overrides are installed before the client is created and
     removed after the test completes, ensuring no override leaks across tests.
 
-    The ``ASGITransport`` routes requests directly through the ASGI interface
-    without starting a real TCP server.  This is both faster and more
-    deterministic than spawning a server process.
-
     Args:
         db_session: Isolated test database session (per-test fixture).
         fake_redis: In-memory Redis substitute (per-test fixture).
 
     Yields:
-        A configured ``AsyncClient`` instance ready for use in tests.
+        A configured AsyncClient instance ready for use in tests.
     """
     from app.core.config import get_settings
     from app.core.database import get_db
 
-    # Install overrides: replace the real DB session and Redis client with
-    # their test counterparts.  get_settings is also overridden to prevent
-    # the test from depending on any .env file present on the developer's
-    # machine.
-    app.dependency_overrides[get_db] = _override_get_db_factory(db_session)
+    async def _override_get_db() -> AsyncGenerator[AsyncSession, None]:
+        yield db_session
+
+    app.dependency_overrides[get_db] = _override_get_db
     app.dependency_overrides[get_redis] = lambda: fake_redis
     app.dependency_overrides[get_settings] = lambda: _TEST_SETTINGS
 
-    transport = ASGITransport(app=app)  # type: ignore[arg-type]
-
     async with AsyncClient(
-        transport=transport,
+        transport=ASGITransport(app=app),  # type: ignore[arg-type]
         base_url="http://testserver",
     ) as client:
         yield client
 
-    # Remove all overrides after the test to restore the application to its
-    # original state.  This prevents override state from affecting other tests
-    # that run in the same process.
     app.dependency_overrides.clear()
 
 
 # ---------------------------------------------------------------------------
-# Role-specific user fixtures (Phase 4)
+# Role-specific user fixtures
 # ---------------------------------------------------------------------------
-# Each fixture creates a User row directly via the ORM (no HTTP round-trip)
-# and issues an access token using the same test settings used by
-# async_client.  Only an access token is returned — refresh tokens are not
-# needed for dependency unit tests or role-gated endpoint tests.
-#
-# A synthetic session_id is embedded in every token so that get_current_user's
-# Redis session check (step 4) can be satisfied in integration tests by
-# seeding fake_redis with session:{session_id} = str(user.id).
-#
-# Note on fixed emails: each fixture below uses a fixed email address.
-# This is fine when a test uses the fixture on its own. If a test needs a
-# second user of the same kind in the same scenario (e.g. to test cross-user
-# isolation), create that extra user inline with a unique email such as
-# f"user_{uuid4()}@example.com" rather than requesting the same fixture twice.
-# ---------------------------------------------------------------------------
-
-_FIXTURE_SESSION_ID = "00000000-0000-0000-0000-000000000001"
+# Distinct session IDs per fixture role prevent Redis key collisions when two
+# fixtures are active in the same test (e.g. a test that creates both a
+# verified_user and an admin_user and checks Redis state for each).
+_VERIFIED_SESSION_ID = "00000000-0000-0000-0000-000000000001"
+_ADMIN_SESSION_ID = "00000000-0000-0000-0000-000000000002"
+_AUDITOR_SESSION_ID = "00000000-0000-0000-0000-000000000003"
+_UNVERIFIED_SESSION_ID = "00000000-0000-0000-0000-000000000004"
 
 
 @pytest.fixture()
 async def verified_user(db_session: AsyncSession) -> tuple[User, str]:
     """Create a verified USER-role account and return (user, access_token).
-
-    The User is inserted directly into the test database via the ORM.
-    The access token is signed with the same test settings used by
-    ``async_client``.  No refresh token is issued.
 
     Security properties demonstrated:
     - is_verified=True — satisfies the require_verified gate (SR-03).
@@ -289,7 +213,7 @@ async def verified_user(db_session: AsyncSession) -> tuple[User, str]:
     token = create_access_token(
         subject=str(user.id),
         role=user.role.value,
-        session_id=_FIXTURE_SESSION_ID,
+        session_id=_VERIFIED_SESSION_ID,
         settings=_TEST_SETTINGS,
     )
     return user, token
@@ -298,10 +222,6 @@ async def verified_user(db_session: AsyncSession) -> tuple[User, str]:
 @pytest.fixture()
 async def admin_user(db_session: AsyncSession) -> tuple[User, str]:
     """Create a verified ADMIN-role account and return (user, access_token).
-
-    The User is inserted directly into the test database via the ORM.
-    The access token is signed with the same test settings used by
-    ``async_client``.  No refresh token is issued.
 
     Security properties demonstrated:
     - is_verified=True — satisfies the require_verified gate (SR-03).
@@ -321,7 +241,7 @@ async def admin_user(db_session: AsyncSession) -> tuple[User, str]:
     token = create_access_token(
         subject=str(user.id),
         role=user.role.value,
-        session_id=_FIXTURE_SESSION_ID,
+        session_id=_ADMIN_SESSION_ID,
         settings=_TEST_SETTINGS,
     )
     return user, token
@@ -330,10 +250,6 @@ async def admin_user(db_session: AsyncSession) -> tuple[User, str]:
 @pytest.fixture()
 async def auditor_user(db_session: AsyncSession) -> tuple[User, str]:
     """Create a verified AUDITOR-role account and return (user, access_token).
-
-    The User is inserted directly into the test database via the ORM.
-    The access token is signed with the same test settings used by
-    ``async_client``.  No refresh token is issued.
 
     Security properties demonstrated:
     - is_verified=True — satisfies the require_verified gate (SR-03).
@@ -353,7 +269,7 @@ async def auditor_user(db_session: AsyncSession) -> tuple[User, str]:
     token = create_access_token(
         subject=str(user.id),
         role=user.role.value,
-        session_id=_FIXTURE_SESSION_ID,
+        session_id=_AUDITOR_SESSION_ID,
         settings=_TEST_SETTINGS,
     )
     return user, token
@@ -362,11 +278,6 @@ async def auditor_user(db_session: AsyncSession) -> tuple[User, str]:
 @pytest.fixture()
 async def unverified_user(db_session: AsyncSession) -> tuple[User, str]:
     """Create an unverified USER-role account and return (user, access_token).
-
-    The User is inserted directly into the test database via the ORM with
-    is_verified=False, simulating a registered but not yet email-verified account.
-    The access token is signed with the same test settings used by
-    ``async_client``.  No refresh token is issued.
 
     Security properties demonstrated:
     - is_verified=False — must be rejected by require_verified (SR-03).
@@ -386,7 +297,7 @@ async def unverified_user(db_session: AsyncSession) -> tuple[User, str]:
     token = create_access_token(
         subject=str(user.id),
         role=user.role.value,
-        session_id=_FIXTURE_SESSION_ID,
+        session_id=_UNVERIFIED_SESSION_ID,
         settings=_TEST_SETTINGS,
     )
     return user, token

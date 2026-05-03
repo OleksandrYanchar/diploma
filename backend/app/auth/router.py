@@ -1,41 +1,42 @@
 """Authentication router — registration, verification, login, refresh, logout, and MFA.
 
 Exposes:
-- POST /auth/register          -- create a new user account (SR-01, SR-02, SR-03)
-- GET  /auth/verify-email      -- consume the email verification token (SR-03)
-- POST /auth/login             -- authenticate and receive JWT + refresh token
-                                  (SR-02, SR-05, SR-06, SR-07, SR-10, SR-16)
-- POST /auth/refresh           -- rotate refresh token and issue new access token
-                                  (SR-07, SR-08, SR-10, SR-16)
-- POST /auth/logout            -- terminate session, revoke tokens
-                                  (SR-09, SR-10, SR-16)
-- POST /auth/mfa/setup         -- initiate TOTP enrollment, return secret + QR code
-                                  (SR-04, SR-16)
-- POST /auth/mfa/enable        -- confirm TOTP code and activate the MFA gate
-                                  (SR-04, SR-16)
-- POST /auth/mfa/disable       -- deactivate the MFA gate after verifying password +
-                                  TOTP
-                                  (SR-04, SR-16)
-- POST /auth/password/change   -- change the authenticated user's password
-                                  (SR-01, SR-02, SR-16; ADR-21)
-- POST /auth/step-up           -- verify TOTP and issue a short-lived step-up JWT
-                                  for sensitive operations (SR-13, SR-14, SR-16)
+- POST /auth/register                 -- create a new user account (SR-01, SR-02, SR-03)
+- GET  /auth/verify-email             -- consume the email verification token (SR-03)
+- POST /auth/login                    -- authenticate and receive JWT + refresh token
+                                         (SR-02, SR-05, SR-06, SR-07, SR-10, SR-16)
+- POST /auth/refresh                  -- rotate refresh token and issue new access token
+                                         (SR-07, SR-08, SR-10, SR-16)
+- POST /auth/logout                   -- terminate session, revoke tokens
+                                         (SR-09, SR-10, SR-16)
+- POST /auth/mfa/setup                -- initiate TOTP enrollment, return secret + QR
+                                         code (SR-04, SR-16)
+- POST /auth/mfa/enable               -- confirm TOTP code and activate the MFA gate
+                                         (SR-04, SR-16)
+- POST /auth/mfa/disable              -- deactivate the MFA gate after verifying
+                                         password + TOTP (SR-04, SR-16)
+- POST /auth/password/change          -- change the authenticated user's password
+                                         (SR-01, SR-02, SR-16; ADR-21)
+- POST /auth/step-up                  -- verify TOTP and issue a short-lived step-up JWT
+                                         for sensitive operations (SR-13, SR-14, SR-16)
+- POST /auth/password/reset/request   -- issue a one-time password reset token (SR-18)
+- POST /auth/password/reset/confirm   -- verify reset token and set new password
+                                         (SR-01, SR-02, SR-07, SR-10, SR-18)
 
 Route handlers are intentionally thin: they extract HTTP inputs, delegate all
 business logic to ``auth.service``, and format the response.  No security
 decisions are made here.
 
-Security note: /register, /verify-email, /login, and /refresh are unauthenticated
-by design -- /refresh accepts an expired access token intentionally, so it cannot
-require a valid Bearer credential.  /logout, /mfa/setup, /mfa/enable, /mfa/disable,
-/password/change, and /step-up require a valid Bearer token via ``get_current_user``.
-/step-up additionally requires ``require_verified``.  Rate limiting is enforced at
-the Nginx layer (SR-15).
+Security note: /register, /verify-email, /login, /refresh, /password/reset/request,
+and /password/reset/confirm are unauthenticated by design.  /logout, /mfa/setup,
+/mfa/enable, /mfa/disable, /password/change, and /step-up require a valid Bearer
+token via ``get_current_user``.  /step-up additionally requires ``require_verified``.
+Rate limiting is enforced at the Nginx layer (SR-15).
 """
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import InvalidTokenError
 from redis.asyncio import Redis
@@ -43,9 +44,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.service import (
     change_password,
+    confirm_password_reset,
     disable_mfa,
     enable_mfa,
     register_user,
+    request_password_reset,
     setup_mfa,
     verify_email,
     verify_step_up,
@@ -67,6 +70,8 @@ from app.schemas.auth import (
     MFARequiredResponse,
     MFASetupResponse,
     PasswordChangeRequest,
+    PasswordResetConfirmRequest,
+    PasswordResetRequest,
     RefreshRequest,
     StepUpRequest,
     StepUpResponse,
@@ -84,6 +89,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
     summary="Register a new user account",
 )
 async def register(
+    request: Request,
     body: UserCreate,
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
@@ -97,6 +103,8 @@ async def register(
     demo mode; sent via SMTP in production).
 
     Args:
+        request:  The incoming FastAPI Request, used to extract IP and
+                  User-Agent for audit logging (SR-16).
         body:     Validated ``UserCreate`` payload (email + password).
         db:       Injected async database session.
         settings: Injected application settings.
@@ -108,11 +116,17 @@ async def register(
         HTTPException 422: Weak password or invalid email format.
         HTTPException 409: Email address already registered.
     """
+    ip_address = request.headers.get("X-Real-IP") or (
+        request.client.host if request.client else None
+    )
+    user_agent = request.headers.get("User-Agent")
     user = await register_user(
         email=body.email,
         password=body.password,
         db=db,
         settings=settings,
+        ip_address=ip_address,
+        user_agent=user_agent,
     )
     return UserResponse.model_validate(user)
 
@@ -123,6 +137,7 @@ async def register(
     status_code=status.HTTP_200_OK,
 )
 async def verify_email_endpoint(
+    request: Request,
     token: str,
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, str]:
@@ -136,8 +151,10 @@ async def verify_email_endpoint(
     that replay attempts return HTTP 400.
 
     Args:
-        token: The raw verification token from the query string.
-        db:    Injected async database session.
+        request: The incoming FastAPI Request, used to extract IP and
+                 User-Agent for audit logging (SR-16).
+        token:   The raw verification token from the query string.
+        db:      Injected async database session.
 
     Returns:
         A success message dict with HTTP 200.
@@ -145,7 +162,16 @@ async def verify_email_endpoint(
     Raises:
         HTTPException 400: Invalid, expired, or already used token.
     """
-    await verify_email(token=token, db=db)
+    ip_address = request.headers.get("X-Real-IP") or (
+        request.client.host if request.client else None
+    )
+    user_agent = request.headers.get("User-Agent")
+    await verify_email(
+        token=token,
+        db=db,
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )
     return {"message": "Email verified successfully."}
 
 
@@ -156,6 +182,7 @@ async def verify_email_endpoint(
     summary="Authenticate and receive access + refresh tokens",
 )
 async def login(
+    request: Request,
     body: LoginRequest,
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),  # type: ignore[type-arg]
@@ -184,6 +211,8 @@ async def login(
     objects directly and let FastAPI serialize whichever model is returned.
 
     Args:
+        request:  The incoming FastAPI Request, used to extract IP and
+                  User-Agent for audit logging (SR-16).
         body:     Validated ``LoginRequest`` payload (email + password; optional
                   TOTP code for MFA accounts in Phase 3).
         db:       Injected async database session.
@@ -199,6 +228,10 @@ async def login(
         HTTPException 401: Invalid credentials (wrong email or wrong password).
         HTTPException 403: Account deactivated or temporarily locked (SR-05).
     """
+    ip_address = request.headers.get("X-Real-IP") or (
+        request.client.host if request.client else None
+    )
+    user_agent = request.headers.get("User-Agent")
     access_token, raw_refresh = await login_service(
         email=body.email,
         password=body.password,
@@ -206,6 +239,8 @@ async def login(
         redis=redis,
         settings=settings,
         totp_code=body.totp_code,
+        ip_address=ip_address,
+        user_agent=user_agent,
     )
 
     if access_token is None:
@@ -227,6 +262,7 @@ async def login(
     summary="Rotate refresh token and issue a new access + refresh token pair",
 )
 async def refresh(
+    request: Request,
     body: RefreshRequest,
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),  # type: ignore[type-arg]
@@ -250,6 +286,8 @@ async def refresh(
     - SR-16: A TOKEN_REFRESHED audit log entry is written on success.
 
     Args:
+        request:  The incoming FastAPI Request, used to extract IP and
+                  User-Agent for audit logging (SR-16).
         body:     Validated ``RefreshRequest`` containing the raw refresh token.
         db:       Injected async database session.
         redis:    Injected Redis client for session management.
@@ -262,11 +300,17 @@ async def refresh(
     Raises:
         HTTPException 401: Token not found, already used (SR-08), or expired.
     """
+    ip_address = request.headers.get("X-Real-IP") or (
+        request.client.host if request.client else None
+    )
+    user_agent = request.headers.get("User-Agent")
     new_access_token, new_raw_refresh = await refresh_tokens_service(
         raw_refresh_token=body.refresh_token,
         db=db,
         redis=redis,
         settings=settings,
+        ip_address=ip_address,
+        user_agent=user_agent,
     )
     return TokenResponse(
         access_token=new_access_token,
@@ -281,6 +325,7 @@ async def refresh(
     summary="Terminate the current session and revoke tokens",
 )
 async def logout(
+    request: Request,
     body: LogoutRequest,
     current_user: User = Depends(get_current_user),
     credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer()),
@@ -306,6 +351,8 @@ async def logout(
     rotation), the step is skipped silently.
 
     Args:
+        request:      The incoming FastAPI Request, used to extract IP and
+                      User-Agent for audit logging (SR-16).
         body:         Validated ``LogoutRequest`` containing the raw refresh token.
         current_user: Authenticated User provided by ``get_current_user``.
         credentials:  Raw Bearer credentials extracted by ``HTTPBearer``.
@@ -332,12 +379,18 @@ async def logout(
             detail="Invalid or expired token",
         ) from exc
 
+    ip_address = request.headers.get("X-Real-IP") or (
+        request.client.host if request.client else None
+    )
+    user_agent = request.headers.get("User-Agent")
     await logout_service(
         user=current_user,
         raw_refresh_token=body.refresh_token,
         access_token_payload=payload,
         db=db,
         redis=redis,
+        ip_address=ip_address,
+        user_agent=user_agent,
     )
     return {"message": "Logged out successfully."}
 
@@ -349,6 +402,7 @@ async def logout(
     summary="Initiate TOTP MFA enrollment and receive secret + QR code",
 )
 async def mfa_setup(
+    request: Request,
     current_user: User = Depends(get_current_user),
     _verified: None = Depends(require_verified),
     db: AsyncSession = Depends(get_db),
@@ -368,6 +422,8 @@ async def mfa_setup(
     (Phase 4) with a valid TOTP code to confirm enrollment and activate the gate.
 
     Args:
+        request:      The incoming FastAPI Request, used to extract IP and
+                      User-Agent for audit logging (SR-16).
         current_user: Authenticated User provided by ``get_current_user``.
         db:           Injected async database session.
         settings:     Injected application settings (app_name used as issuer).
@@ -381,10 +437,16 @@ async def mfa_setup(
         HTTPException 401: Missing or invalid Authorization token.
         HTTPException 403: Authorization header absent (HTTPBearer behaviour).
     """
+    ip_address = request.headers.get("X-Real-IP") or (
+        request.client.host if request.client else None
+    )
+    user_agent = request.headers.get("User-Agent")
     secret, qr_code_base64 = await setup_mfa(
         user=current_user,
         db=db,
         settings=settings,
+        ip_address=ip_address,
+        user_agent=user_agent,
     )
     return MFASetupResponse(
         secret=secret,
@@ -399,6 +461,7 @@ async def mfa_setup(
     summary="Confirm TOTP enrollment and activate the MFA gate",
 )
 async def mfa_enable(
+    request: Request,
     body: MFAEnableRequest,
     current_user: User = Depends(get_current_user),
     _verified: None = Depends(require_verified),
@@ -419,6 +482,8 @@ async def mfa_enable(
     is returned (SR-16).
 
     Args:
+        request:      The incoming FastAPI Request, used to extract IP and
+                      User-Agent for audit logging (SR-16).
         body:         Validated ``MFAEnableRequest`` containing the TOTP code.
         current_user: Authenticated User provided by ``get_current_user``.
         db:           Injected async database session.
@@ -431,10 +496,16 @@ async def mfa_enable(
         HTTPException 401: TOTP code is invalid (MFA_FAILED audit log written).
         HTTPException 403: Authorization header absent (HTTPBearer behaviour).
     """
+    ip_address = request.headers.get("X-Real-IP") or (
+        request.client.host if request.client else None
+    )
+    user_agent = request.headers.get("User-Agent")
     await enable_mfa(
         user=current_user,
         totp_code=body.totp_code,
         db=db,
+        ip_address=ip_address,
+        user_agent=user_agent,
     )
     return {"detail": "MFA enabled successfully"}
 
@@ -445,6 +516,7 @@ async def mfa_enable(
     summary="Disable MFA after verifying password and current TOTP code",
 )
 async def mfa_disable(
+    request: Request,
     body: MFADisableRequest,
     current_user: User = Depends(get_current_user),
     _verified: None = Depends(require_verified),
@@ -463,6 +535,8 @@ async def mfa_disable(
     before the 401 is returned (SR-16).
 
     Args:
+        request:      The incoming FastAPI Request, used to extract IP and
+                      User-Agent for audit logging (SR-16).
         body:         Validated ``MFADisableRequest`` (password + totp_code).
         current_user: Authenticated User provided by ``get_current_user``.
         db:           Injected async database session.
@@ -476,11 +550,17 @@ async def mfa_disable(
         HTTPException 401: TOTP code is invalid (MFA_FAILED audit log written).
         HTTPException 403: Authorization header absent (HTTPBearer behaviour).
     """
+    ip_address = request.headers.get("X-Real-IP") or (
+        request.client.host if request.client else None
+    )
+    user_agent = request.headers.get("User-Agent")
     await disable_mfa(
         user=current_user,
         password=body.password,
         totp_code=body.totp_code,
         db=db,
+        ip_address=ip_address,
+        user_agent=user_agent,
     )
     return {"detail": "MFA disabled successfully"}
 
@@ -491,6 +571,7 @@ async def mfa_disable(
     summary="Change the authenticated user's password",
 )
 async def password_change(
+    request: Request,
     body: PasswordChangeRequest,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -505,6 +586,8 @@ async def password_change(
     Email verification is not required for this endpoint.
 
     Args:
+        request:      The incoming FastAPI Request, used to extract IP and
+                      User-Agent for audit logging (SR-16).
         body:         Validated ``PasswordChangeRequest`` (current_password +
                       new_password).
         current_user: Authenticated User provided by ``get_current_user``.
@@ -518,11 +601,17 @@ async def password_change(
         HTTPException 422: New password fails the SR-01 strength policy.
         HTTPException 403: Authorization header absent (HTTPBearer behaviour).
     """
+    ip_address = request.headers.get("X-Real-IP") or (
+        request.client.host if request.client else None
+    )
+    user_agent = request.headers.get("User-Agent")
     await change_password(
         user=current_user,
         current_password=body.current_password,
         new_password=body.new_password,
         db=db,
+        ip_address=ip_address,
+        user_agent=user_agent,
     )
     return {"detail": "Password changed successfully"}
 
@@ -534,6 +623,7 @@ async def password_change(
     summary="Verify TOTP and issue a short-lived step-up token",
 )
 async def step_up(
+    request: Request,
     body: StepUpRequest,
     current_user: User = Depends(get_current_user),
     _verified: None = Depends(require_verified),
@@ -558,6 +648,8 @@ async def step_up(
     there is no TOTP code to verify and the endpoint returns 403.
 
     Args:
+        request:      The incoming FastAPI Request, used to extract IP and
+                      User-Agent for audit logging (SR-16).
         body:         Validated ``StepUpRequest`` containing the TOTP code.
         current_user: Authenticated User provided by ``get_current_user``.
         _verified:    Enforces email verification via ``require_verified`` (SR-03).
@@ -574,14 +666,129 @@ async def step_up(
         HTTPException 401: TOTP code invalid (STEP_UP_FAILED audit log written).
         HTTPException 403: Email not verified, or MFA not enabled on account.
     """
+    ip_address = request.headers.get("X-Real-IP") or (
+        request.client.host if request.client else None
+    )
+    user_agent = request.headers.get("User-Agent")
     token = await verify_step_up(
         user=current_user,
         totp_code=body.totp_code,
         db=db,
         redis=redis,
         settings=settings,
+        ip_address=ip_address,
+        user_agent=user_agent,
     )
     return StepUpResponse(
         step_up_token=token,
         expires_in=settings.step_up_token_expire_minutes * 60,
     )
+
+
+@router.post(
+    "/password/reset/request",
+    status_code=status.HTTP_200_OK,
+    summary="Request a password reset link",
+)
+async def password_reset_request(
+    request: Request,
+    body: PasswordResetRequest,
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, str]:
+    """Issue a one-time password reset token for the given email address.
+
+    This endpoint is intentionally unauthenticated: users who cannot log in
+    (because they have forgotten their password) must be able to reach it.
+
+    Enforces SR-18 non-enumeration: the response is always HTTP 200 with the
+    same message body regardless of whether the email exists in the database.
+    An attacker cannot distinguish a known account from an unknown one by
+    observing the response.
+
+    The raw reset token is delivered out-of-band (printed to stdout in demo
+    mode; sent via SMTP in production).  The token is never included in the
+    HTTP response body.
+
+    Args:
+        request:  The incoming FastAPI Request, used to extract IP and
+                  User-Agent for audit logging (SR-16).
+        body:     Validated ``PasswordResetRequest`` containing the email address.
+        db:       Injected async database session.
+        settings: Injected application settings.
+
+    Returns:
+        A fixed success message dict with HTTP 200 regardless of email existence.
+    """
+    ip_address = request.headers.get("X-Real-IP") or (
+        request.client.host if request.client else None
+    )
+    user_agent = request.headers.get("User-Agent")
+    await request_password_reset(
+        email=body.email,
+        db=db,
+        settings=settings,
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )
+    # SR-18: identical response for both known and unknown email addresses.
+    return {"message": "If that email is registered, a reset link has been sent"}
+
+
+@router.post(
+    "/password/reset/confirm",
+    status_code=status.HTTP_200_OK,
+    summary="Verify a password reset token and set a new password",
+)
+async def password_reset_confirm(
+    request: Request,
+    body: PasswordResetConfirmRequest,
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),  # type: ignore[type-arg]
+    settings: Settings = Depends(get_settings),
+) -> dict[str, str]:
+    """Verify a one-time password reset token and update the account password.
+
+    This endpoint is intentionally unauthenticated: users who cannot log in
+    must be able to complete the reset flow without a Bearer token.
+
+    On success, the service (SR-18):
+    - Sets the new password as an Argon2id hash (SR-01, SR-02).
+    - Clears the reset token fields so the token cannot be reused.
+    - Bulk-deletes all RefreshToken rows for the user (SR-07).
+    - Revokes all active Redis sessions for the user (SR-10).
+    - Writes a PASSWORD_RESET_COMPLETED audit log entry (SR-16).
+
+    On failure the service raises an HTTPException which propagates directly:
+    - HTTP 400: token not found or expired (SR-18).
+    - HTTP 422: new password fails the SR-01 strength policy.
+
+    Args:
+        request:  The incoming FastAPI Request, used to extract IP and
+                  User-Agent for audit logging (SR-16).
+        body:     Validated ``PasswordResetConfirmRequest`` (token + new_password).
+        db:       Injected async database session.
+        redis:    Injected Redis client for session revocation (SR-10).
+        settings: Injected application settings (token TTL, password policy).
+
+    Returns:
+        A success message dict with HTTP 200.
+
+    Raises:
+        HTTPException 400: Invalid or expired reset token.
+        HTTPException 422: New password fails the SR-01 strength policy.
+    """
+    ip_address = request.headers.get("X-Real-IP") or (
+        request.client.host if request.client else None
+    )
+    user_agent = request.headers.get("User-Agent")
+    await confirm_password_reset(
+        token=body.token,
+        new_password=body.new_password,
+        db=db,
+        redis=redis,
+        settings=settings,
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )
+    return {"message": "Password reset successful"}

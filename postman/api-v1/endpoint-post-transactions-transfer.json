@@ -1,0 +1,132 @@
+{
+  "method": "POST",
+  "path": "/transactions/transfer",
+  "authentication": "Bearer (email verification required; step-up token required for amount >= threshold)",
+  "contentType": "application/json",
+  "headers": {
+    "Authorization": "Bearer {{access_token_verified}}"
+  },
+  "notes": "SR-12: from_account is always the authenticated user's account. SR-13: transfers at or above STEP_UP_TRANSFER_THRESHOLD (default $1000.00) require a valid X-Step-Up-Token header obtained from POST /auth/step-up. Step-up check runs before balance check — missing token always returns 403 for high-value requests. Amount must be positive with at most 2 decimal places (SR-20).",
+  "scenarios": {
+    "success_below_threshold": {
+      "description": "Transfer below the step-up threshold. No X-Step-Up-Token header needed.",
+      "body": {
+        "to_account_number": "REPLACE_WITH_RECIPIENT_ACCOUNT_NUMBER",
+        "amount": "50.00",
+        "description": "Rent payment"
+      },
+      "expectedStatus": 200,
+      "responseShape": {
+        "transaction_id": "<UUID>",
+        "from_account_number": "<sender account number>",
+        "to_account_number": "<recipient account number>",
+        "amount": "50.00",
+        "status": "completed",
+        "created_at": "<ISO timestamp>"
+      }
+    },
+    "success_above_threshold_with_step_up": {
+      "description": "High-value transfer with a valid step-up token in X-Step-Up-Token header.",
+      "headers": {
+        "Authorization": "Bearer {{access_token_verified_mfa}}",
+        "X-Step-Up-Token": "{{step_up_token}}"
+      },
+      "body": {
+        "to_account_number": "REPLACE_WITH_RECIPIENT_ACCOUNT_NUMBER",
+        "amount": "1000.00",
+        "description": "Investment transfer"
+      },
+      "expectedStatus": 200
+    },
+    "failure_above_threshold_no_step_up_403": {
+      "description": "Amount >= threshold but no X-Step-Up-Token header. Step-up gate fires before balance check.",
+      "body": {
+        "to_account_number": "REPLACE_WITH_RECIPIENT_ACCOUNT_NUMBER",
+        "amount": "1000.00"
+      },
+      "expectedStatus": 403
+    },
+    "failure_above_threshold_invalid_step_up_403": {
+      "description": "X-Step-Up-Token present but invalid/expired/already consumed.",
+      "headers": {
+        "Authorization": "Bearer {{access_token_verified_mfa}}",
+        "X-Step-Up-Token": "invalid.stepup.token"
+      },
+      "body": {
+        "to_account_number": "REPLACE_WITH_RECIPIENT_ACCOUNT_NUMBER",
+        "amount": "1000.00"
+      },
+      "expectedStatus": 403
+    },
+    "failure_insufficient_balance_400": {
+      "description": "Transfer amount exceeds the sender's current balance.",
+      "body": {
+        "to_account_number": "REPLACE_WITH_RECIPIENT_ACCOUNT_NUMBER",
+        "amount": "99999.00"
+      },
+      "expectedStatus": 400
+    },
+    "failure_self_transfer_422": {
+      "description": "Sender and recipient account numbers are the same.",
+      "body": {
+        "to_account_number": "REPLACE_WITH_OWN_ACCOUNT_NUMBER",
+        "amount": "10.00"
+      },
+      "expectedStatus": 422
+    },
+    "failure_destination_not_active_400": {
+      "description": "Destination account exists but is INACTIVE or FROZEN.",
+      "body": {
+        "to_account_number": "REPLACE_WITH_INACTIVE_ACCOUNT_NUMBER",
+        "amount": "10.00"
+      },
+      "expectedStatus": 400
+    },
+    "failure_destination_not_found_400": {
+      "body": {
+        "to_account_number": "000000000000",
+        "amount": "10.00"
+      },
+      "expectedStatus": 400
+    },
+    "validation_zero_amount_422": {
+      "body": {
+        "to_account_number": "REPLACE_WITH_RECIPIENT_ACCOUNT_NUMBER",
+        "amount": "0"
+      },
+      "expectedStatus": 422
+    },
+    "validation_negative_amount_422": {
+      "body": {
+        "to_account_number": "REPLACE_WITH_RECIPIENT_ACCOUNT_NUMBER",
+        "amount": "-5.00"
+      },
+      "expectedStatus": 422
+    },
+    "validation_too_many_decimal_places_422": {
+      "body": {
+        "to_account_number": "REPLACE_WITH_RECIPIENT_ACCOUNT_NUMBER",
+        "amount": "10.001"
+      },
+      "expectedStatus": 422
+    },
+    "failure_unverified_403": {
+      "headers": {
+        "Authorization": "Bearer {{access_token_unverified}}"
+      },
+      "body": {
+        "to_account_number": "REPLACE_WITH_RECIPIENT_ACCOUNT_NUMBER",
+        "amount": "10.00"
+      },
+      "expectedStatus": 403
+    },
+    "failure_no_bearer_403": {
+      "headers": {},
+      "body": {
+        "to_account_number": "REPLACE_WITH_RECIPIENT_ACCOUNT_NUMBER",
+        "amount": "10.00"
+      },
+      "expectedStatus": 403
+    }
+  }
+}

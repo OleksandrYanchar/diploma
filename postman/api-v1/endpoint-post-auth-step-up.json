@@ -1,0 +1,65 @@
+{
+  "method": "POST",
+  "path": "/api/v1/auth/step-up",
+  "authentication": "Bearer (email verification required; MFA must be enabled)",
+  "contentType": "application/json",
+  "headers": {
+    "Authorization": "Bearer {{access_token_verified_mfa}}"
+  },
+  "notes": "Issues a short-lived step-up JWT (SR-13/SR-14) that authorises one high-value transfer. The token is single-use and expires in STEP_UP_TOKEN_EXPIRE_MINUTES (default 5 min). Include it as the X-Step-Up-Token header on POST /transactions/transfer.",
+  "scenarios": {
+    "success": {
+      "description": "Valid current TOTP code. Response contains step_up_token and expires_in (seconds).",
+      "body": {
+        "totp_code": "123456"
+      },
+      "expectedStatus": 200,
+      "responseShape": {
+        "step_up_token": "<JWT string>",
+        "expires_in": 300
+      }
+    },
+    "failure_wrong_totp_401": {
+      "body": {
+        "totp_code": "000000"
+      },
+      "expectedStatus": 401
+    },
+    "failure_mfa_not_enabled_403": {
+      "description": "User does not have MFA enabled — step-up requires an active TOTP secret.",
+      "headers": {
+        "Authorization": "Bearer {{access_token_verified}}"
+      },
+      "body": {
+        "totp_code": "123456"
+      },
+      "expectedStatus": 403
+    },
+    "failure_unverified_403": {
+      "headers": {
+        "Authorization": "Bearer {{access_token_unverified}}"
+      },
+      "body": {
+        "totp_code": "123456"
+      },
+      "expectedStatus": 403
+    },
+    "failure_no_bearer_403": {
+      "headers": {},
+      "body": {
+        "totp_code": "123456"
+      },
+      "expectedStatus": 403
+    },
+    "validation_totp_too_short_422": {
+      "body": {
+        "totp_code": "12345"
+      },
+      "expectedStatus": 422
+    },
+    "validation_empty_body_422": {
+      "body": {},
+      "expectedStatus": 422
+    }
+  }
+}
