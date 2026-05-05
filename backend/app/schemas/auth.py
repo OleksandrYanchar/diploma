@@ -12,8 +12,6 @@ Security properties:
   from the JWT access token on the server side, not from client-supplied data.
 """
 
-from __future__ import annotations
-
 from pydantic import BaseModel, EmailStr, Field
 
 
@@ -22,10 +20,6 @@ class LoginRequest(BaseModel):
 
     email: EmailStr
     password: str = Field(min_length=1)
-    # TOTP code is optional at the schema level; the service layer raises 401
-    # if it is absent when the account has MFA enabled (SR-04).
-    # pattern rejects non-digit characters at the schema boundary, preventing
-    # injection of arbitrary strings into the TOTP verification path.
     totp_code: str | None = Field(
         default=None,
         min_length=6,

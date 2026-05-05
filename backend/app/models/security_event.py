@@ -14,8 +14,6 @@ Defined event types (added as string constants, not an enum, for extensibility):
   RATE_LIMIT_EXCEEDED, SUSPICIOUS_LOGIN.
 """
 
-from __future__ import annotations
-
 import enum
 import uuid
 from datetime import datetime
@@ -52,8 +50,6 @@ class SecurityEvent(Base):
         nullable=False,
     )
 
-    # Nullable for events involving unknown actors (e.g., brute force on a
-    # non-existent account).
     user_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
@@ -61,8 +57,6 @@ class SecurityEvent(Base):
         index=True,
     )
 
-    # Event type identifier string, e.g. "TOKEN_REUSE", "BRUTE_FORCE".
-    # Free-form string for extensibility without requiring schema migrations.
     event_type: Mapped[str] = mapped_column(
         String(128),
         nullable=False,
@@ -75,15 +69,13 @@ class SecurityEvent(Base):
         index=True,
     )
 
-    # Client IP address as reported by Nginx via X-Real-IP.
     ip_address: Mapped[str | None] = mapped_column(
         String(45),
         nullable=True,
     )
 
-    # Structured JSON payload; content is event-type-dependent.
     # SQLAlchemy JSON type is used here for SQLite test compatibility.
-    # The Alembic migration renders this as JSONB in PostgreSQL (production).
+    # The Alembic migration renders this as JSONB in PostgreSQL.
     details: Mapped[dict | None] = mapped_column(
         JSON,
         nullable=True,
@@ -97,7 +89,6 @@ class SecurityEvent(Base):
         index=True,
     )
 
-    # Relationship to User (optional, for ORM navigation only).
     user: Mapped["User | None"] = relationship(  # noqa: F821
         "User",
         back_populates="security_events",

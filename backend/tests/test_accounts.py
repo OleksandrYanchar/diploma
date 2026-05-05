@@ -8,8 +8,6 @@ Covers:
 - ACCOUNT_VIEWED audit log entry written on each access (SR-16)
 """
 
-from __future__ import annotations
-
 import uuid
 
 from httpx import AsyncClient

@@ -19,8 +19,6 @@ Security properties enforced:
   regardless of exception handling above this call site.
 """
 
-from __future__ import annotations
-
 from fastapi import Depends, Header, HTTPException, Request
 from jwt import InvalidTokenError
 from redis.asyncio import Redis
@@ -50,21 +48,10 @@ async def require_step_up(
     (signature, expiry, ``typ=="step_up"``), checks subject binding, and
     atomically consumes the single-use Redis marker via ``getdel``.
 
-    Usage::
-
-        @router.post("/transfers")
-        async def initiate_transfer(
-            current_user: User = Depends(get_current_user),
-            _verified: None = Depends(require_verified),
-            _step_up: None = Depends(require_step_up),
-        ) -> ...:
-
     Raises:
         HTTPException 403: If the step-up token is absent, invalid, expired,
             bound to a different user, or has already been consumed.
     """
-    # The X-Step-Up-Required response header signals to the client that it
-    # must complete the step-up flow (POST /auth/step-up) before retrying.
     if x_step_up_token is None:
         raise HTTPException(
             status_code=403,
@@ -72,10 +59,6 @@ async def require_step_up(
             headers={"X-Step-Up-Required": "true"},
         )
 
-    # decode_step_up_token checks signature, expiry, algorithm, and
-    # typ=="step_up".  An access token submitted here is rejected by the
-    # typ check — the two token types share the same signing key but are
-    # not interchangeable.
     try:
         payload = decode_step_up_token(x_step_up_token, settings)
     except InvalidTokenError as exc:
@@ -87,12 +70,6 @@ async def require_step_up(
     jti: str = payload["jti"]
     sub: str = payload["sub"]
 
-    # The step-up token sub must match the bearer token sub (current_user).
-    # A mismatch indicates an attempt to use another user's step-up token.
-    # Commit the audit entry AND a HIGH-severity SecurityEvent BEFORE raising
-    # so both events are always persisted regardless of exception handling
-    # above this call site (SR-16) — matching the pattern used in
-    # _validate_step_up_token in transactions/service.py.
     if sub != str(current_user.id):
         ip_address: str | None = request.headers.get("X-Real-IP") or (
             request.client.host if request.client else None
@@ -111,9 +88,7 @@ async def require_step_up(
                 },
             )
         )
-        # SR-17: Write a HIGH-severity SecurityEvent so automated anomaly
-        # detection systems that monitor security_events (rather than the full
-        # audit log) surface this bypass attempt immediately.
+
         db.add(
             SecurityEvent(
                 user_id=current_user.id,
@@ -132,10 +107,6 @@ async def require_step_up(
             detail="Step-up token subject mismatch",
         )
 
-    # getdel atomically reads and deletes the key in one Redis round-trip.
-    # If the key is absent (already consumed or TTL-expired), result is
-    # None and the token is rejected.  There is no TOCTOU window between
-    # the check and the delete because both happen in the same command.
     consumed = await redis.getdel(f"step_up:{jti}")
     if consumed is None:
         raise HTTPException(

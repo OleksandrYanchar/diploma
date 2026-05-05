@@ -8,8 +8,6 @@ parameterized query mechanism — raw SQL string interpolation is never used,
 preventing SQL injection (SR-20).
 """
 
-from __future__ import annotations
-
 from collections.abc import AsyncGenerator
 
 from sqlalchemy.ext.asyncio import (
@@ -22,15 +20,9 @@ from sqlalchemy.orm import DeclarativeBase
 
 
 class Base(DeclarativeBase):
-    """Declarative base class shared by all ORM models.
-
-    All models in ``app/models/`` must inherit from this class so that
-    Alembic's autogenerate can discover their table definitions through the
-    shared ``metadata`` object.
-    """
+    """Declarative base class shared by all ORM models."""
 
 
-# Initialised once at startup by init_db(); tests override via dependency injection.
 _engine: AsyncEngine | None = None
 _async_session_factory: async_sessionmaker[AsyncSession] | None = None
 
@@ -47,7 +39,7 @@ def init_db(database_url: str) -> None:
         echo=False,
         pool_size=10,
         max_overflow=20,
-        pool_pre_ping=True,  # Detect and replace stale connections.
+        pool_pre_ping=True,
     )
 
     _async_session_factory = async_sessionmaker(
@@ -76,16 +68,6 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """FastAPI dependency that yields a database session per request.
 
     Each request receives its own ``AsyncSession``.
-
-    Usage in a route::
-
-        from fastapi import Depends
-        from sqlalchemy.ext.asyncio import AsyncSession
-        from app.core.database import get_db
-
-        @router.get("/example")
-        async def example(db: AsyncSession = Depends(get_db)):
-            ...
 
     Raises:
         RuntimeError: If ``init_db`` has not been called before the first

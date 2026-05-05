@@ -2,10 +2,6 @@
 
 Implements the business logic for the transactions module:
 
-- ``execute_transfer``: validates source and destination accounts, enforces
-  the step-up authentication threshold, atomically updates both balances,
-  creates a Transaction row, and writes audit log entries for every outcome.
-
 Security properties enforced:
 - SR-12: Source account is looked up by ``user_id = current_user.id`` — no
   account identifier is accepted from the client for the source side.
@@ -21,8 +17,6 @@ Security properties enforced:
 - T-02: Destination is resolved by public ``account_number`` — internal UUIDs
   are never accepted from the client, preventing IDOR enumeration.
 """
-
-from __future__ import annotations
 
 import uuid
 from decimal import Decimal
@@ -110,10 +104,6 @@ async def _validate_step_up_token(
     sub: str = payload["sub"]
 
     if sub != str(current_user.id):
-        # Commit the STEP_UP_BYPASS_ATTEMPT audit row BEFORE raising so the
-        # event is always persisted, matching the require_step_up dependency
-        # (SR-16).  The outer execute_transfer handler will additionally write
-        # a TRANSFER_REJECTED audit row from its except block.
         await _write_audit(
             db=db,
             user_id=current_user.id,
@@ -126,10 +116,6 @@ async def _validate_step_up_token(
             ip_address=ip_address,
             user_agent=user_agent,
         )
-        # SR-17: Write a HIGH-severity SecurityEvent for the subject-mismatch
-        # bypass attempt.  The audit log records the action for the audit trail;
-        # this SecurityEvent surfaces it to automated anomaly detection systems
-        # that monitor the security_events table rather than the full audit log.
         db.add(
             SecurityEvent(
                 user_id=current_user.id,
@@ -187,8 +173,6 @@ async def execute_transfer(
             a different user, or already consumed (when amount >= threshold).
         HTTPException 422: Self-transfer attempt.
     """
-    # This is committed immediately so the attempt is recorded regardless
-    # of what happens in subsequent validation steps (SR-16).
     await _write_audit(
         db=db,
         user_id=current_user.id,
@@ -201,8 +185,6 @@ async def execute_transfer(
         user_agent=user_agent,
     )
 
-    # Filtered by user_id to enforce ownership — the client never specifies
-    # the source account directly (SR-12).
     result = await db.execute(select(Account).where(Account.user_id == current_user.id))
     from_account: Account | None = result.scalar_one_or_none()
 
@@ -232,8 +214,6 @@ async def execute_transfer(
         )
         raise HTTPException(status_code=400, detail="Account is not active")
 
-    # Using the public identifier rather than an internal UUID prevents IDOR
-    # enumeration of other users' account UUIDs (T-02).
     dest_result = await db.execute(
         select(Account).where(Account.account_number == request.to_account_number)
     )
@@ -253,8 +233,6 @@ async def execute_transfer(
         )
         raise HTTPException(status_code=400, detail="Destination account not found")
 
-    # Transferring to one's own account is a no-op that could be used to
-    # inflate audit trail noise or exploit rounding behaviour.
     if from_account.id == to_account.id:
         await _write_audit(
             db=db,
@@ -284,10 +262,6 @@ async def execute_transfer(
         )
         raise HTTPException(status_code=400, detail="Destination account is not active")
 
-    # Checked before balance so that a missing step-up token always
-    # returns 403 regardless of account balance — prevents leaking
-    # balance state to unauthenticated high-value requests.
-    # The threshold is stored in integer cents (e.g. 100000 = $1000.00).
     threshold: Decimal = Decimal(settings.step_up_transfer_threshold) / Decimal(100)
     if request.amount >= threshold:
         try:
@@ -317,9 +291,6 @@ async def execute_transfer(
             )
             raise
 
-    # The balance column is Numeric(18,2) — SQLAlchemy returns Decimal.
-    # request.amount is Decimal (validated by the Pydantic schema).
-    # No float arithmetic is performed (SR-20).
     if from_account.balance < request.amount:
         await _write_audit(
             db=db,
@@ -335,10 +306,6 @@ async def execute_transfer(
         )
         raise HTTPException(status_code=400, detail="Insufficient balance")
 
-    # Both balance mutations and the Transaction INSERT happen inside a
-    # single savepoint so they are committed as one unit.  If the flush
-    # raises (e.g. a constraint violation), only the savepoint rolls back;
-    # the outer session, which already holds the audit logs, is unaffected.
     transaction: Transaction
     async with db.begin_nested():
         from_account.balance -= request.amount
@@ -404,15 +371,11 @@ async def get_transaction_history(
         ``TransactionResponse`` items, the total count, current page, and
         page size.
     """
-    # Filtered strictly by user_id — no account ID is accepted from the
-    # client (SR-12).
     account_result = await db.execute(
         select(Account).where(Account.user_id == current_user.id)
     )
     account: Account | None = account_result.scalar_one_or_none()
 
-    # This is a legitimate state (user registered but never opened an
-    # account).  Return an empty response rather than a 4xx error.
     if account is None:
         await _write_audit(
             db=db,
@@ -429,8 +392,6 @@ async def get_transaction_history(
             page_size=page_size,
         )
 
-    # A transaction belongs to the user if their account appears on
-    # either side (sender or receiver).
     count_result = await db.execute(
         select(func.count()).where(
             (Transaction.from_account_id == account.id)
@@ -439,8 +400,6 @@ async def get_transaction_history(
     )
     total: int = count_result.scalar_one()
 
-    # ORDER BY created_at DESC so the most recent transactions appear
-    # first.  OFFSET is 0-indexed, so page 1 starts at offset 0.
     offset = (page - 1) * page_size
     rows_result = await db.execute(
         select(Transaction)

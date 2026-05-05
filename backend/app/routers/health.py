@@ -4,14 +4,7 @@ Provides a single public endpoint that confirms the application is running.
 This endpoint is intentionally unauthenticated — its only purpose is to let
 infrastructure (Docker health checks, Nginx upstream probes, monitoring) verify
 that the FastAPI process is alive and reachable.
-
-Security note: this endpoint returns no sensitive information.  It does NOT
-expose database state, Redis state, configuration values, or internal errors.
-Any infrastructure check failure is surfaced as a 503 from the load balancer,
-not from this endpoint.
 """
-
-from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 

@@ -9,13 +9,7 @@ authentication layer:
 - Step-up token creation and decoding (SR-13, SR-14)
 - Refresh token generation and hashing (SR-07)
 - Generic token hashing for DB storage (SR-03, SR-07, SR-18)
-
-Nothing in this module performs I/O or holds application state.  All
-functions are pure transformations that receive their inputs explicitly,
-making them straightforward to test in isolation.
 """
-
-from __future__ import annotations
 
 import hashlib
 import secrets
@@ -24,12 +18,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import jwt
-from jwt import InvalidTokenError  # noqa: F401  (re-exported for callers)
+from jwt import InvalidTokenError  # noqa: F401
 from passlib.context import CryptContext
 
 from app.core.config import Settings
 
-# Argon2id context (SR-02): memory_cost=65536 KB, time_cost=3, parallelism=4.
 _pwd_context = CryptContext(
     schemes=["argon2"],
     deprecated="auto",
@@ -85,6 +78,7 @@ def is_password_strong(password: str) -> bool:
     responsible for translating a False return into an appropriate HTTP 422
     response.
     """
+    # TODO: rewrite with regular expressions
     if len(password) < 12:
         return False
     if not any(c.isupper() for c in password):
@@ -108,10 +102,6 @@ def create_access_token(
 
     Enforces SR-06: access tokens are short-lived (TTL from
     ``settings.access_token_expire_minutes``, maximum 15 minutes per policy).
-
-    The ``typ="access"`` claim is critical: step-up tokens share the same
-    signing key but carry ``typ="step_up"``.  Without this check, a step-up
-    token could be submitted as a bearer token to bypass TOTP re-verification.
     """
     now = datetime.now(tz=timezone.utc)
     expire = now + timedelta(minutes=settings.access_token_expire_minutes)
@@ -139,10 +129,6 @@ def decode_access_token(token: str, settings: Settings) -> dict[str, Any]:
     Enforces SR-06 (expiry validation) and guards against step-up token reuse
     as a bearer token by checking ``typ == "access"``.
 
-    The ``typ`` check is mandatory: step-up tokens are signed with the same
-    key and algorithm.  A token that passes signature and expiry checks but
-    carries ``typ="step_up"`` must be rejected here.
-
     Raises:
         InvalidTokenError: On expired, tampered, wrong algorithm, or wrong typ.
     """
@@ -163,11 +149,6 @@ def create_step_up_token(subject: str, settings: Settings) -> tuple[str, str]:
 
     Enforces SR-13 (step-up authentication for sensitive transfers) and
     SR-14 (step-up token is single-use, tracked by JTI in Redis).
-
-    The ``typ="step_up"`` claim is critical: ``decode_access_token`` rejects
-    this type, so a step-up token cannot be submitted as a regular bearer token.
-    Returns a (token, jti) tuple; caller stores the JTI in Redis for single-use
-    consumption by ``require_step_up``.
     """
     now = datetime.now(tz=timezone.utc)
     expire = now + timedelta(minutes=settings.step_up_token_expire_minutes)
@@ -195,10 +176,6 @@ def decode_step_up_token(token: str, settings: Settings) -> dict[str, Any]:
     Enforces SR-13 (step-up token must be valid and unexpired) and guards
     against regular access tokens being submitted in place of a step-up
     token by checking ``typ == "step_up"``.
-
-    The ``typ`` check mirrors ``decode_access_token``: both token types share
-    the same signing key, so the type claim is the only guard against
-    cross-type substitution attacks.
 
     Raises:
         InvalidTokenError: On expired, tampered, wrong algorithm, or wrong typ.

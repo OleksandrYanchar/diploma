@@ -13,8 +13,6 @@ a valid session before exercising the logout endpoint.  Each test is fully
 isolated via the ``async_client`` fixture (fresh SQLite + FakeRedis per test).
 """
 
-from __future__ import annotations
-
 import uuid
 
 import jwt as pyjwt
@@ -39,12 +37,7 @@ from tests.helpers import (
     register_verify_login,
 )
 
-# ---------------------------------------------------------------------------
-# Test-only protected route for post-logout token rejection test
-#
-# Registered once at module import time.  Uses a distinct path to avoid
-# colliding with the route defined in test_get_current_user.py.
-# ---------------------------------------------------------------------------
+# Distinct path avoids collision with the route registered in test_get_current_user.py.
 _PROTECTED_LOGOUT_URL = "/test-protected-logout"
 
 
@@ -56,15 +49,7 @@ async def _test_protected_logout(
     return {"user_id": str(current_user.id)}
 
 
-# ---------------------------------------------------------------------------
-# URL constants
-# ---------------------------------------------------------------------------
 _LOGOUT_URL = "/api/v1/auth/logout"
-
-
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -116,7 +101,6 @@ async def test_logout_blacklists_access_token(
     )
     assert logout_resp.status_code == 200
 
-    # The same access token must now be rejected.
     protected_resp = await async_client.get(
         _PROTECTED_LOGOUT_URL,
         headers={"Authorization": f"Bearer {access_token}"},
@@ -148,7 +132,6 @@ async def test_logout_revokes_refresh_token(
     )
     assert logout_resp.status_code == 200
 
-    # Compute the hash that was stored at login time and look it up directly.
     token_hash = hash_token(refresh_token)
     result = await db_session.execute(
         select(RefreshToken).where(RefreshToken.token_hash == token_hash)
@@ -175,7 +158,6 @@ async def test_logout_deletes_redis_session(
         async_client, capsys, email
     )
 
-    # Decode the JWT (skip expiry check) to extract session_id.
     settings = Settings()  # type: ignore[call-arg]
     decoded = pyjwt.decode(
         access_token,
@@ -192,7 +174,6 @@ async def test_logout_deletes_redis_session(
     )
     assert logout_resp.status_code == 200
 
-    # The session key must be absent from Redis after logout.
     session_value = await fake_redis.get(f"session:{session_id}")  # type: ignore[union-attr]
     assert session_value is None, "Redis session must be deleted after logout"
 
@@ -210,7 +191,6 @@ async def test_logout_audit_log_written(
     """
     email = "logout_audit@example.com"
 
-    # Register separately to capture user_id from the response.
     reg_resp = await async_client.post(
         REGISTER_URL,
         json={"email": email, "password": STRONG_PASSWORD},
@@ -239,8 +219,6 @@ async def test_logout_audit_log_written(
     )
     assert logout_resp.status_code == 200
 
-    # ADR-18: scope the audit log query by both action and user_id to avoid
-    # false matches from other tests sharing the same in-memory database.
     result = await db_session.execute(
         select(AuditLog).where(
             AuditLog.action == "LOGOUT",

@@ -11,8 +11,6 @@ Security properties:
 - ``amount`` uses Numeric to avoid floating-point errors (SR-20).
 """
 
-from __future__ import annotations
-
 import enum
 import uuid
 from datetime import datetime
@@ -53,23 +51,20 @@ class Transaction(Base):
         nullable=False,
     )
 
-    # Source account.  Null for deposits (external source).
     from_account_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("accounts.id", ondelete="SET NULL"),
-        nullable=True,
+        nullable=True,  # Null for external source.
         index=True,
     )
 
-    # Destination account.  Null for withdrawals (external destination).
     to_account_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("accounts.id", ondelete="SET NULL"),
-        nullable=True,
+        nullable=True,  # Null for withdrawals to external destination.
         index=True,
     )
 
-    # Transfer amount.  Must be positive; validated at the schema layer (SR-20).
     amount: Mapped[Decimal] = mapped_column(
         Numeric(precision=18, scale=2),
         nullable=False,
@@ -94,21 +89,18 @@ class Transaction(Base):
         default=TransactionStatus.PENDING,
     )
 
-    # Optional human-readable note.  Never used for business logic decisions.
     description: Mapped[str | None] = mapped_column(
         String(512),
         nullable=True,
         default=None,
     )
 
-    # Immutable creation timestamp.
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         server_default=func.now(),
     )
 
-    # Relationships
     from_account: Mapped["Account | None"] = relationship(  # noqa: F821
         "Account",
         foreign_keys=[from_account_id],

@@ -1,10 +1,5 @@
 """Transactions router — Phase 5.
 
-Exposes:
-  POST /transactions/transfer  — execute a fund transfer between two accounts.
-  GET  /transactions/history   — paginated transaction history for the
-                                  authenticated user's account.
-
 Route handlers are intentionally thin: HTTP concerns only.  All business
 logic lives in ``transactions/service.py``.
 
@@ -23,8 +18,6 @@ Security notes:
 - Transaction history is scoped to the authenticated user's account inside the
   service layer; no account identifier is accepted from the client (SR-12).
 """
-
-from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Header, Query, Request
 from redis.asyncio import Redis
@@ -68,14 +61,6 @@ async def transfer(
     step-up token in the ``X-Step-Up-Token`` header.  The threshold decision
     is enforced server-side in ``execute_transfer`` — clients cannot bypass it
     by omitting the header on a below-threshold amount.
-
-    Ownership of the source account is derived from the authenticated user
-    (SR-12).  The destination is resolved by public ``account_number`` to
-    prevent IDOR enumeration (T-02).
-
-    IP address and user agent are extracted from the Nginx-forwarded headers
-    (``X-Real-IP``, ``User-Agent``) and passed as plain strings to the service
-    layer for audit log capture (SR-16).
 
     Args:
         body:            Validated ``TransferRequest`` (destination, amount,

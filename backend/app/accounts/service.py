@@ -16,8 +16,6 @@ Security properties enforced:
 - SR-16: every successful account access writes an ACCOUNT_VIEWED audit log entry.
 """
 
-from __future__ import annotations
-
 import uuid
 
 from sqlalchemy import select
@@ -58,9 +56,6 @@ async def get_or_create_account(
     if account is not None:
         return account
 
-    # No account yet — attempt to create one.  Use a nested transaction (SAVEPOINT)
-    # so that an IntegrityError on the INSERT can be rolled back without
-    # invalidating the outer session.
     try:
         async with db.begin_nested():
             account = Account(
@@ -70,8 +65,7 @@ async def get_or_create_account(
                 currency="USD",
             )
             db.add(account)
-            # Flush inside the nested transaction to trigger the unique constraint
-            # check before the savepoint is released.
+
             await db.flush()
 
         await db.commit()
@@ -79,9 +73,6 @@ async def get_or_create_account(
         return account
 
     except IntegrityError:
-        # A concurrent request won the race and already inserted an account for
-        # this user.  The savepoint has been rolled back automatically; re-fetch
-        # the winner's row.
         await db.rollback()
         result = await db.execute(select(Account).where(Account.user_id == user.id))
         account = result.scalar_one()

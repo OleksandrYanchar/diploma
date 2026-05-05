@@ -1,6 +1,6 @@
 """End-to-end happy-path test for the complete authentication lifecycle.
 
-Walks through every Phase 1–4 auth flow in a single test:
+Walks through every Phase 1-4 auth flow in a single test:
 register → verify email → login → GET /users/me → refresh → MFA setup →
 MFA enable → logout → MFA login → password change → MFA disable →
 plain login → logout → blacklisted-token rejection.
@@ -15,8 +15,6 @@ Run with ``-s`` to see the step-by-step request trace::
 
     poetry run pytest tests/test_e2e_auth_lifecycle.py -v -s
 """
-
-from __future__ import annotations
 
 import pyotp
 import pytest

@@ -7,8 +7,6 @@ Security properties:
   JSON serialisation boundaries (floating-point representation is lossy).
 """
 
-from __future__ import annotations
-
 import uuid
 from datetime import datetime
 from decimal import Decimal

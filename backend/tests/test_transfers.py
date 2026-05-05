@@ -1,22 +1,9 @@
 """Integration tests for POST /transactions/transfer.
 
-Covers:
-- Authentication and verification gates (SR-03, SR-06)
-- Schema-level validation (amount > 0, 2 decimal places)
-- Business rule rejections: destination not found, self-transfer, insufficient balance
-- Below-threshold transfer without step-up token (SR-13 — threshold not reached)
-- Above-threshold transfer missing step-up token (SR-13 — 403 + X-Step-Up-Required)
-- Above-threshold transfer with a valid step-up token (SR-13, SR-14)
-- Single-use enforcement: reusing a consumed step-up token (SR-14)
-- Audit log entries: TRANSFER_INITIATED and TRANSFER_COMPLETED written on success
-  (SR-16)
-
 Account setup: Account rows are inserted directly via ORM rather than going
 through GET /accounts/me, so tests are isolated from the accounts module and
 run faster (no HTTP round-trip for setup).
 """
-
-from __future__ import annotations
 
 import uuid
 from decimal import Decimal
@@ -32,10 +19,6 @@ from tests.conftest import _TEST_SETTINGS
 from tests.helpers import make_orm_user
 
 TRANSFER_URL = "/api/v1/transactions/transfer"
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 
 async def _make_account(
@@ -55,11 +38,6 @@ async def _make_account(
     await db.commit()
     await db.refresh(account)
     return account
-
-
-# ---------------------------------------------------------------------------
-# Authentication and verification gates
-# ---------------------------------------------------------------------------
 
 
 async def test_transfer_unauthenticated(async_client: AsyncClient) -> None:
@@ -100,11 +78,6 @@ async def test_transfer_unverified(
         headers={"Authorization": f"Bearer {token}"},
     )
     assert response.status_code == 403
-
-
-# ---------------------------------------------------------------------------
-# Schema-level validation (rejected before the service is called)
-# ---------------------------------------------------------------------------
 
 
 async def test_transfer_invalid_amount_zero(
@@ -155,11 +128,6 @@ async def test_transfer_invalid_amount_negative(
         headers={"Authorization": f"Bearer {token}"},
     )
     assert response.status_code == 422
-
-
-# ---------------------------------------------------------------------------
-# Service-level business rule rejections
-# ---------------------------------------------------------------------------
 
 
 async def test_transfer_destination_not_found(
@@ -255,11 +223,6 @@ async def test_transfer_insufficient_balance(
     )
     assert response.status_code == 400
     assert "Insufficient balance" in response.json()["detail"]
-
-
-# ---------------------------------------------------------------------------
-# Step-up threshold logic
-# ---------------------------------------------------------------------------
 
 
 async def test_transfer_below_threshold_no_step_up(
@@ -508,11 +471,6 @@ async def test_transfer_above_threshold_consumed_step_up(
     assert second.status_code == 403
 
 
-# ---------------------------------------------------------------------------
-# Audit log assertions
-# ---------------------------------------------------------------------------
-
-
 async def test_transfer_audit_logs_written(
     async_client: AsyncClient,
     db_session: AsyncSession,
@@ -560,11 +518,6 @@ async def test_transfer_audit_logs_written(
         assert log is not None, f"Expected audit log entry for action='{action}'"
 
 
-# ---------------------------------------------------------------------------
-# Additional schema-level validation (SR-20)
-# ---------------------------------------------------------------------------
-
-
 async def test_transfer_three_decimal_places_returns_422(
     async_client: AsyncClient,
     db_session: AsyncSession,
@@ -590,11 +543,6 @@ async def test_transfer_three_decimal_places_returns_422(
         headers={"Authorization": f"Bearer {token}"},
     )
     assert response.status_code == 422
-
-
-# ---------------------------------------------------------------------------
-# Destination account status rejections (T-02)
-# ---------------------------------------------------------------------------
 
 
 async def test_transfer_to_inactive_destination_returns_400(
@@ -695,11 +643,6 @@ async def test_transfer_to_frozen_destination_returns_400(
     assert log is not None
     assert log.details is not None
     assert log.details.get("reason") == "destination_not_active"
-
-
-# ---------------------------------------------------------------------------
-# TRANSFER_REJECTED audit coverage for failure paths (SR-16)
-# ---------------------------------------------------------------------------
 
 
 async def test_transfer_rejected_audit_log_on_insufficient_balance(

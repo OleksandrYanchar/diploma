@@ -12,8 +12,6 @@ Security properties:
 - ``details`` is a JSON field for structured, action-specific metadata.
 """
 
-from __future__ import annotations
-
 import uuid
 from datetime import datetime
 
@@ -36,8 +34,6 @@ class AuditLog(Base):
         nullable=False,
     )
 
-    # Nullable: some events occur before a user is identified (e.g., failed login
-    # for an unknown email address).
     user_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
@@ -45,16 +41,13 @@ class AuditLog(Base):
         index=True,
     )
 
-    # Action name, e.g. "LOGIN_SUCCESS", "TRANSFER_COMPLETED".
-    # Kept as a free-form string rather than an enum to allow new action types
-    # to be added without a database migration.
+    # Kept as astring rather than an enum to allow new types without migrations
     action: Mapped[str] = mapped_column(
         String(128),
         nullable=False,
         index=True,
     )
 
-    # Client IP address as reported by Nginx via X-Real-IP.
     ip_address: Mapped[str | None] = mapped_column(
         String(45),  # IPv6 max length
         nullable=True,
@@ -67,16 +60,13 @@ class AuditLog(Base):
     )
 
     # Structured JSON payload; content is action-dependent.
-    # Examples: {"email": "...", "reason": "wrong_password"} for LOGIN_FAILED.
-    # SQLAlchemy JSON type is used here for SQLite test compatibility.
-    # The Alembic migration renders this as JSONB in PostgreSQL (production).
+    # The Alembic migration renders this as JSONB in PostgreSQL.
     details: Mapped[dict | None] = mapped_column(
         JSON,
         nullable=True,
         default=None,
     )
 
-    # Immutable creation timestamp.
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -84,7 +74,6 @@ class AuditLog(Base):
         index=True,
     )
 
-    # Relationship to User (optional, for ORM navigation only).
     user: Mapped["User | None"] = relationship(  # noqa: F821
         "User",
         back_populates="audit_logs",

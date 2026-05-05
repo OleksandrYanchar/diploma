@@ -37,8 +37,6 @@ Security properties enforced:
   re-authenticated after the credential change.
 """
 
-from __future__ import annotations
-
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -75,7 +73,7 @@ async def register_user(
     email: str,
     password: str,
     db: AsyncSession,
-    settings: Settings,  # noqa: ARG001  (reserved for future SMTP / policy use)
+    settings: Settings,  # noqa: ARG001 Not used as SMTP not implemented
     ip_address: str | None = None,
     user_agent: str | None = None,
 ) -> User:
@@ -143,7 +141,7 @@ async def register_user(
     await db.commit()
     await db.refresh(user)
 
-    # DEMO MODE: replace with real SMTP in production.
+    # TODO: replace with real SMTP in production.
     print(  # noqa: T201
         f"[DEMO MODE] Email verification token for {email}: {raw_verification_token}"
     )
@@ -252,12 +250,8 @@ async def login(
     user = result.scalar_one_or_none()
 
     if user is None:
-        # Anti-timing: always perform a hash comparison so response time is
-        # consistent whether or not the email exists in the database.
         verify_password(password, _DUMMY_HASH)
 
-        # SR-16: Audit log for the unknown-email path.  Written AFTER the dummy
-        # hash so that the anti-timing protection is never short-circuited.
         db.add(
             AuditLog(
                 user_id=None,
@@ -273,9 +267,6 @@ async def login(
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Account is deactivated")
 
-    # SQLite returns DateTime columns as naive datetimes; PostgreSQL returns
-    # them as timezone-aware.  To keep the comparison safe across both
-    # backends, we attach UTC to a naive locked_until value if needed.
     if user.locked_until is not None:
         locked_until = user.locked_until
         if locked_until.tzinfo is None:
@@ -291,14 +282,10 @@ async def login(
         user.failed_login_count += 1
 
         if user.failed_login_count >= settings.max_failed_login_attempts:
-            # Threshold reached: lock the account and reset the counter.
             user.locked_until = _utcnow() + timedelta(
                 minutes=settings.account_lockout_minutes
             )
             user.failed_login_count = 0
-            # SR-17: Write a HIGH-severity SecurityEvent for the lockout so
-            # that automated monitoring and the admin role can detect brute-
-            # force attacks without scanning the full audit log (SR-16).
             db.add(
                 SecurityEvent(
                     user_id=user.id,
@@ -313,9 +300,6 @@ async def login(
                     },
                 )
             )
-            # SR-16: AuditLog entry for the lockout event (human-readable trail).
-            # The SecurityEvent above serves automated monitoring; this entry
-            # ensures the lockout appears in audit log queries as well.
             db.add(
                 AuditLog(
                     user_id=user.id,
@@ -341,20 +325,6 @@ async def login(
         await db.commit()
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    # Sub-case A (no totp_code supplied):
-    #   Return the sentinel (None, None) so the router can issue HTTP 200
-    #   with MFARequiredResponse.  A LOGIN_MFA_REQUIRED audit log is written
-    #   to record the password-verified, TOTP-pending state (SR-16).
-    #
-    # Sub-case B (totp_code supplied but invalid):
-    #   Write a MFA_FAILED audit log, commit it BEFORE raising so the failure
-    #   is always persisted regardless of exception handling above this call
-    #   site, then raise HTTPException 401 (SR-04, SR-16).
-    #
-    # Sub-case C (totp_code supplied and valid):
-    #   Write a MFA_VERIFIED audit log and fall through to token issuance.
-    #   The audit entry is committed with the session/token writes below so
-    #   that the success record and the session are always atomic (SR-16).
     if user.mfa_enabled:
         if not totp_code:
             # Sub-case A: password was valid but no TOTP code was provided.
@@ -371,11 +341,7 @@ async def login(
             await db.commit()
             return None, None
 
-        # Sub-case B/C: a TOTP code was supplied — verify it (SR-04).
         if not verify_totp_code(user.mfa_secret, totp_code):
-            # Sub-case B: invalid TOTP code.
-            # Commit the audit entry BEFORE raising so the failure event is
-            # always persisted (SR-16), matching the LOGIN_FAILED pattern.
             db.add(
                 AuditLog(
                     user_id=user.id,
@@ -388,8 +354,6 @@ async def login(
             await db.commit()
             raise HTTPException(status_code=401, detail="Invalid TOTP code")
 
-        # Sub-case C: TOTP code is valid.  Stage the success audit log — it
-        # will be committed atomically with the session/token writes below.
         db.add(
             AuditLog(
                 user_id=user.id,
@@ -425,7 +389,6 @@ async def login(
     )
     db.add(refresh_token_record)
 
-    # TTL matches the refresh token lifetime so the session expires naturally.
     session_ttl_seconds = settings.refresh_token_expire_days * 86400
     await redis.set(
         f"session:{session_id}",
@@ -484,24 +447,6 @@ async def refresh_tokens(
     if token_row is None:
         raise HTTPException(status_code=401, detail="Invalid refresh token")
 
-    #
-    # A revoked token arriving here means either:
-    # a) The legitimate client is replaying an old token (bug or race), or
-    # b) An attacker captured a pre-rotation token and is replaying it.
-    #
-    # In both cases the correct response is to destroy every active session
-    # for this user so that neither the legitimate client nor an attacker can
-    # continue using any existing credentials.  The legitimate client will
-    # receive 401 on their next request and must re-authenticate, which is the
-    # correct outcome — the credential theft window is fully closed.
-    #
-    # We cannot only delete the old session (token_row.session_id): after a
-    # successful prior rotation the old session no longer exists in Redis.  The
-    # live session belongs to the *successor* refresh token row.  Instead we
-    # delete all ``session:{session_id}`` keys for every refresh token row
-    # belonging to this user, regardless of revocation state.  This covers
-    # both the original session and any sessions established by subsequent
-    # rotations.
     if token_row.revoked:
         user_rt_result = await db.execute(
             select(RefreshToken).where(RefreshToken.user_id == token_row.user_id)
@@ -510,10 +455,7 @@ async def refresh_tokens(
         session_keys = [f"session:{rt.session_id}" for rt in all_user_tokens]
         if session_keys:
             await redis.delete(*session_keys)
-        # SR-17: Write a CRITICAL-severity SecurityEvent for token reuse so
-        # that the incident is distinguishable from normal 401s in automated
-        # monitoring dashboards.  All sessions for this user have already been
-        # revoked above; this write records the event for forensic correlation.
+
         db.add(
             SecurityEvent(
                 user_id=token_row.user_id,
@@ -547,12 +489,6 @@ async def refresh_tokens(
     old_session_id = str(token_row.session_id)
     token_row.revoked = True
 
-    #
-    # Rotating the session_id on every refresh ensures that a stolen old
-    # access token (still within its short lifetime) cannot be associated
-    # with the newly rotated session — the new session_id must match the
-    # Redis key, so the old access token is automatically invalidated at
-    # the next get_current_user check.
     new_raw_refresh = generate_refresh_token()
     new_session_id = str(uuid.uuid4())
 
@@ -572,10 +508,6 @@ async def refresh_tokens(
         settings=settings,
     )
 
-    #
-    # Delete the old session key first so there is no window where both the
-    # old and new session are simultaneously live.  Then set the new key with
-    # a fresh TTL matching the new refresh token lifetime.
     session_ttl_seconds = settings.refresh_token_expire_days * 86400
     await redis.delete(f"session:{old_session_id}")
     await redis.set(
@@ -614,23 +546,12 @@ async def logout(
     token: if the token's remaining TTL is zero or negative, the JTI blacklist
     step is skipped because the token can no longer be presented to any endpoint.
     """
-    #
-    # The JTI blacklist ensures that a logout is effective immediately even
-    # though the access token's cryptographic signature remains valid until
-    # its natural expiry.  The Redis TTL is set to the remaining lifetime so
-    # the blacklist entry is automatically cleaned up once the token expires.
     jti: str = access_token_payload["jti"]
     exp: int = access_token_payload["exp"]
     remaining_ttl = exp - int(datetime.now(timezone.utc).timestamp())
     if remaining_ttl > 0:
         await redis.setex(f"blacklist:{jti}", remaining_ttl, "1")
 
-    #
-    # The raw token is hashed to look up the DB row.  The row is NOT deleted
-    # so that the audit trail is preserved (SR-16).  Setting revoked=True
-    # ensures the token cannot be used again.  If the row is not found (e.g.
-    # already revoked by a prior logout or rotation), we skip silently — the
-    # logout operation is still correct.
     refresh_hash = hash_token(raw_refresh_token)
     rt_result = await db.execute(
         select(RefreshToken).where(
@@ -642,11 +563,6 @@ async def logout(
     if refresh_token_row is not None:
         refresh_token_row.revoked = True
 
-    #
-    # Removing the session record from Redis immediately invalidates any
-    # request that arrives after this point, even if it carries a still-valid
-    # JWT that was not yet caught by the JTI blacklist (e.g. a concurrent
-    # request that slipped through before the blacklist write).
     session_id: str = access_token_payload["session_id"]
     await redis.delete(f"session:{session_id}")
 
@@ -690,18 +606,12 @@ async def disable_mfa(
         HTTPException 401: If the supplied TOTP code is invalid, with a
             MFA_FAILED audit log entry committed before raising.
     """
-    # There is nothing to disable on an account that has not enrolled.
     if not user.mfa_enabled:
         raise HTTPException(
             status_code=400,
             detail="MFA is not enabled",
         )
 
-    # This prevents an attacker who holds a stolen access token from
-    # silently disabling MFA without knowing the account password.
-    # Commit the MFA_FAILED audit entry BEFORE raising so the failure is
-    # always persisted regardless of any exception handling above this
-    # call site (SR-16), matching the pattern used for TOTP failures.
     if not verify_password(password, user.hashed_password):
         db.add(
             AuditLog(
@@ -718,9 +628,6 @@ async def disable_mfa(
             detail="Invalid credentials",
         )
 
-    # On failure: commit the audit entry BEFORE raising so the event is
-    # always persisted (SR-16), matching the pattern used in enable_mfa
-    # and in the login MFA gate.
     if not verify_totp_code(user.mfa_secret, totp_code):
         db.add(
             AuditLog(
@@ -734,9 +641,6 @@ async def disable_mfa(
         await db.commit()
         raise HTTPException(status_code=401, detail="Invalid TOTP code")
 
-    # Both mutations and the success audit entry are committed atomically
-    # so that the user state and the audit record are always consistent
-    # (SR-04, SR-16).
     user.mfa_enabled = False
     user.mfa_secret = None
 
@@ -772,23 +676,17 @@ async def change_password(
         HTTPException 401: If current_password does not match the stored hash.
         HTTPException 422: If new_password fails the SR-01 strength policy.
     """
-    # verify_password uses passlib's constant-time Argon2id comparison.
     if not verify_password(current_password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    # Checked before hashing to avoid burning Argon2 cost on a password
-    # that will be rejected anyway.
     if not is_password_strong(new_password):
         raise HTTPException(
             status_code=422,
             detail="Password does not meet strength requirements",
         )
 
-    # The plaintext new_password is never persisted.
     user.hashed_password = hash_password(new_password)
 
-    # The audit row and the password update are committed atomically so
-    # the user state and the audit record are always consistent.
     db.add(
         AuditLog(
             user_id=user.id,
@@ -799,14 +697,13 @@ async def change_password(
         )
     )
 
-    # Session revocation is intentionally omitted — see ADR-21.
     await db.commit()
 
 
 async def request_password_reset(
     email: str,
     db: AsyncSession,
-    settings: Settings,  # noqa: ARG001  (reserved for future SMTP use)
+    settings: Settings,  # noqa: ARG001 Not used as SMTP not implemented
     ip_address: str | None = None,
     user_agent: str | None = None,
 ) -> None:
@@ -818,16 +715,13 @@ async def request_password_reset(
     HTTP 200 whether or not the email exists.
 
     The raw token is printed in demo mode so that integration tests and
+
     manual testing can complete the reset flow without a real email server.
     In production this print statement must be replaced with an SMTP send.
     """
     result = await db.execute(select(User).where(User.email == email))
     user = result.scalar_one_or_none()
 
-    #
-    # Do NOT raise an exception or change the response for an unknown
-    # email.  The caller must return HTTP 200 regardless so that an
-    # attacker cannot enumerate valid accounts by observing error codes.
     if user is None:
         db.add(
             AuditLog(
@@ -841,10 +735,8 @@ async def request_password_reset(
         await db.commit()
         return
 
-    # Generate a cryptographically random opaque token (256 bits entropy).
     raw_token = generate_refresh_token()
 
-    # Store only the SHA-256 hash — the raw token is never persisted.
     user.password_reset_token_hash = hash_token(raw_token)
     user.password_reset_sent_at = datetime.now(timezone.utc)
 
@@ -860,7 +752,7 @@ async def request_password_reset(
 
     await db.commit()
 
-    # DEMO MODE: replace with real SMTP in production.
+    # TODO: replace with real SMTP in production.
     print(  # noqa: T201
         f"[DEMO MODE] Password reset token for {email}: {raw_token}"
     )
@@ -892,23 +784,14 @@ async def confirm_password_reset(
     )
     user = result.scalar_one_or_none()
 
-    #
-    # The error message is intentionally identical to the expiry error
-    # below so that an attacker cannot distinguish between an invalid
-    # token and an expired one (no oracle).
     if user is None:
         raise HTTPException(
             status_code=400,
             detail="Invalid or expired reset token",
         )
 
-    #
-    # SQLite returns DateTime(timezone=True) columns as naive datetimes.
-    # Attaching UTC ensures the comparison is safe across both SQLite
-    # (tests) and PostgreSQL (production).
     sent_at = user.password_reset_sent_at
     if sent_at is None:
-        # Defensive guard: hash present but timestamp missing — treat as expired.
         raise HTTPException(
             status_code=400,
             detail="Invalid or expired reset token",
@@ -924,30 +807,19 @@ async def confirm_password_reset(
             detail="Invalid or expired reset token",
         )
 
-    # Checked before any DB mutation so no state is changed on rejection.
     if not is_password_strong(new_password):
         raise HTTPException(
             status_code=422,
             detail="Password does not meet strength requirements",
         )
 
-    # The plaintext new_password is never persisted.
     user.hashed_password = hash_password(new_password)
 
     user.password_reset_token_hash = None
     user.password_reset_sent_at = None
 
-    #
-    # A direct DELETE statement is used rather than ORM iteration so that
-    # all rows are removed in a single round-trip regardless of how many
-    # active sessions the user has.
     await db.execute(delete(RefreshToken).where(RefreshToken.user_id == user.id))
 
-    #
-    # Sessions are stored under keys "session:{session_id}" with the value
-    # set to str(user.id) (see login() above).  We scan for all session
-    # keys and delete those whose stored value matches this user's ID.
-    # scan_iter is non-blocking and works correctly on FakeRedis in tests.
     user_id_str = str(user.id)
     keys_to_delete: list[str] = []
     async for key in redis.scan_iter("session:*"):
@@ -958,8 +830,6 @@ async def confirm_password_reset(
     if keys_to_delete:
         await redis.delete(*keys_to_delete)
 
-    # The audit row, password update, token clear, and RT deletions are
-    # all committed in a single transaction so they are always consistent.
     db.add(
         AuditLog(
             user_id=user.id,
@@ -1015,17 +885,13 @@ async def verify_step_up(
         HTTPException 401: If the supplied TOTP code is invalid.  A
             ``STEP_UP_FAILED`` audit log entry is committed before raising.
     """
-    # Step-up is meaningless without an enrolled second factor.  An account
-    # that never enrolled MFA cannot prove elevated intent via TOTP.
+
     if not user.mfa_enabled:
         raise HTTPException(
             status_code=403,
             detail="MFA must be enabled to use step-up authentication",
         )
 
-    # On failure: commit the audit entry BEFORE raising so the event is
-    # always persisted (SR-16), matching the pattern used for login and
-    # enable_mfa failure paths.
     if not verify_totp_code(user.mfa_secret, totp_code):
         db.add(
             AuditLog(
@@ -1039,20 +905,11 @@ async def verify_step_up(
         await db.commit()
         raise HTTPException(status_code=401, detail="Invalid TOTP code")
 
-    # ``create_step_up_token`` returns (token, jti).  The ``typ="step_up"``
-    # claim ensures that ``decode_access_token`` rejects this token if it
-    # is submitted as a regular bearer credential.
     token, jti = create_step_up_token(subject=str(user.id), settings=settings)
 
-    # The key is ``step_up:{jti}``.  The TTL matches the token lifetime so
-    # the marker is automatically cleaned up when the token expires.
-    # ``require_step_up`` will delete this key on first consumption.
     ttl_seconds = settings.step_up_token_expire_minutes * 60
     await redis.set(f"step_up:{jti}", str(user.id), ex=ttl_seconds)
 
-    # The audit row and the Redis write are not transactional together;
-    # the Redis write is the authoritative record for the one-time-use
-    # check.  The audit row exists for the human-readable audit trail.
     db.add(
         AuditLog(
             user_id=user.id,
@@ -1100,25 +957,17 @@ async def setup_mfa(
     Raises:
         HTTPException 400: If MFA is already fully enabled on the account.
     """
-    # An already-enabled account must go through disable first (Phase 4).
     if user.mfa_enabled:
         raise HTTPException(
             status_code=400,
             detail="MFA is already enabled",
         )
 
-    # Any previously abandoned secret (mfa_secret set, mfa_enabled False)
-    # is overwritten.  The old secret was never confirmed by a valid TOTP
-    # code, so discarding it is the correct behaviour.
     secret = generate_totp_secret()
     user.mfa_secret = secret
 
-    # Flush so the mfa_secret write is part of the same DB transaction
-    # before the audit log is appended.
     await db.flush()
 
-    # Committing once with both the secret update and the audit row
-    # ensures the two are always consistent — either both land or neither.
     audit = AuditLog(
         user_id=user.id,
         action="MFA_SETUP_INITIATED",
@@ -1129,8 +978,6 @@ async def setup_mfa(
     db.add(audit)
     await db.commit()
 
-    # The provisioning URI is built from the confirmed-saved secret.
-    # The issuer name comes from settings.app_name (SR-04).
     qr_code_base64 = generate_qr_code_base64(
         secret=secret,
         email=user.email,
@@ -1169,25 +1016,18 @@ async def enable_mfa(
         HTTPException 401: If the supplied TOTP code is invalid, with a
             MFA_FAILED audit log entry committed before raising.
     """
-    # mfa_secret is None until setup_mfa is called.  An enable attempt
-    # before setup has no secret to verify against — reject immediately.
     if user.mfa_secret is None:
         raise HTTPException(
             status_code=400,
             detail="MFA setup not initiated",
         )
 
-    # Re-enabling an already-enabled account is a no-op at best and a
-    # mistake at worst.  The user must disable first (Phase 4).
     if user.mfa_enabled:
         raise HTTPException(
             status_code=400,
             detail="MFA is already enabled",
         )
 
-    # verify_totp_code uses pyotp's constant-time HMAC comparison (SR-04).
-    # On failure: commit the audit log entry BEFORE raising so the event
-    # is always persisted (SR-16).
     if not verify_totp_code(user.mfa_secret, totp_code):
         db.add(
             AuditLog(
@@ -1201,8 +1041,6 @@ async def enable_mfa(
         await db.commit()
         raise HTTPException(status_code=401, detail="Invalid TOTP code")
 
-    # Both mutations are committed in a single atomic transaction so the
-    # user state and the audit record are always consistent (SR-16).
     user.mfa_enabled = True
 
     db.add(

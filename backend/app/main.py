@@ -3,15 +3,10 @@
 Creates the FastAPI application, registers the lifespan context manager for
 startup/shutdown, and includes all routers.
 
-Phase 1 state: only the health router is registered.  All other routers
-(auth, users, accounts, transactions, admin) are added in subsequent phases.
-
 Security note: OpenAPI docs (/docs, /redoc) are disabled in production.
 In development, they are useful for manually verifying the API surface area
 and security dependencies.  The ``debug`` flag in settings controls this.
 """
-
-from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -39,13 +34,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """
     settings: Settings = get_settings()
 
-    # --- Startup ---
+    # Startup
     init_db(str(settings.database_url))
     init_redis(str(settings.redis_url))
 
     yield
 
-    # --- Shutdown ---
+    # Shutdown
     await close_redis()
     await close_db()
 
@@ -62,7 +57,7 @@ def create_application() -> FastAPI:
         version=settings.app_version,
         docs_url=docs_url,
         redoc_url=redoc_url,
-        # Disable the OpenAPI schema endpoint in production as well.
+        # Disables the OpenAPI schema endpoint in production.
         openapi_url="/openapi.json" if settings.debug else None,
         lifespan=lifespan,
     )

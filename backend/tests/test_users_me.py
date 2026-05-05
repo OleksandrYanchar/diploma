@@ -1,9 +1,9 @@
-"""Tests for GET /api/v1/users/me (Phase 4, Step 2).
+"""Tests for GET /api/v1/users/me.
 
 Verifies that the endpoint:
 - Returns the authenticated user's own profile (SR-11, I-06).
 - Excludes sensitive fields from the response (SR-02, SR-04).
-- Allows unverified users to read their own profile (Phase 4 policy).
+- Allows unverified users to read their own profile.
 - Rejects unauthenticated requests with HTTP 403 (HTTPBearer behaviour).
 - Returns only the caller's profile, not another user's.
 
@@ -17,8 +17,6 @@ only one test per session may use that fixture.  Tests that need additional
 users create them inline with unique per-test email addresses to avoid UNIQUE
 constraint violations.
 """
-
-from __future__ import annotations
 
 import fakeredis.aioredis as fakeredis
 import pytest

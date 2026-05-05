@@ -9,8 +9,6 @@ Security property enforced: SR-19 (no hardcoded secrets), SR-06 (token TTL
 is configurable and defaults to the mandated 15-minute access token window).
 """
 
-from __future__ import annotations
-
 from typing import Any
 
 from pydantic import Field, PostgresDsn, RedisDsn, field_validator, model_validator

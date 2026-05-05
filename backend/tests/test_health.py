@@ -9,8 +9,6 @@ verify that the response contains no unexpected fields that could leak
 internal state.
 """
 
-from __future__ import annotations
-
 import pytest
 from httpx import AsyncClient
 

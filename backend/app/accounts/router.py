@@ -1,7 +1,4 @@
-"""Accounts router — Phase 5.
-
-Exposes:
-  GET /accounts/me — return the authenticated verified user's account.
+"""Accounts router
 
 Route handlers are intentionally thin: HTTP concerns only.  All business
 logic lives in ``accounts/service.py``.
@@ -10,8 +7,6 @@ Security note: this endpoint requires both authentication (``get_current_user``)
 and email verification (``require_verified``).  Unverified users may not access
 financial resources (SR-03, SR-12).
 """
-
-from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession

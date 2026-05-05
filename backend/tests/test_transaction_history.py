@@ -1,18 +1,8 @@
 """Integration tests for GET /transactions/history.
 
-Covers:
-- Authentication and verification gates (SR-06, SR-03)
-- Empty history: no account, and account with no transactions
-- Own-transaction visibility: outgoing and incoming rows both returned
-- Cross-user isolation: user B cannot see user A's transactions (SR-12)
-- Pagination: page/page_size slicing, correct total regardless of page
-- Audit log: TRANSACTIONS_VIEWED entry written on every request (SR-16)
-
 Account and Transaction rows are inserted directly via ORM — no HTTP
 round-trip is used for setup, keeping tests isolated from the accounts module.
 """
-
-from __future__ import annotations
 
 import uuid
 from decimal import Decimal
@@ -27,10 +17,6 @@ from app.models.transaction import Transaction, TransactionStatus, TransactionTy
 from tests.helpers import make_orm_user
 
 HISTORY_URL = "/api/v1/transactions/history"
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 
 async def _make_account(
@@ -72,17 +58,8 @@ async def _make_transaction(
     return tx
 
 
-# ---------------------------------------------------------------------------
-# Authentication and verification gates
-# ---------------------------------------------------------------------------
-
-
 async def test_history_unauthenticated(async_client: AsyncClient) -> None:
-    """Request without a bearer token is rejected with 401 or 403.
-
-    Security property (SR-06): the Zero Trust gate must reject any request
-    that does not carry a valid access token.
-    """
+    """Request without a bearer token is rejected with 401 or 403 (SR-06)."""
     response = await async_client.get(HISTORY_URL)
     assert response.status_code in (401, 403)
 
@@ -92,11 +69,7 @@ async def test_history_unverified(
     db_session: AsyncSession,
     fake_redis: object,
 ) -> None:
-    """Unverified user is rejected with 403.
-
-    Security property (SR-03): unverified accounts must not access financial
-    resources until email is confirmed.
-    """
+    """Unverified user is rejected with 403 (SR-03)."""
     _, token = await make_orm_user(
         db_session,
         fake_redis,
@@ -110,21 +83,12 @@ async def test_history_unverified(
     assert response.status_code == 403
 
 
-# ---------------------------------------------------------------------------
-# Empty-history cases
-# ---------------------------------------------------------------------------
-
-
 async def test_history_empty_no_account(
     async_client: AsyncClient,
     db_session: AsyncSession,
     fake_redis: object,
 ) -> None:
-    """Verified user with no account receives an empty list with total=0.
-
-    This is a legitimate state (registered user who has not yet opened an
-    account).  The service returns an empty response, not an error.
-    """
+    """Verified user with no account receives an empty list with total=0."""
     _, token = await make_orm_user(
         db_session,
         fake_redis,
@@ -147,11 +111,7 @@ async def test_history_empty_with_account(
     db_session: AsyncSession,
     fake_redis: object,
 ) -> None:
-    """Verified user with an account but no transactions receives an empty list.
-
-    Confirms that the service handles an empty result set without error and
-    still returns a well-formed paginated response.
-    """
+    """Verified user with an account but no transactions receives an empty list."""
     user, token = await make_orm_user(
         db_session,
         fake_redis,
@@ -171,21 +131,12 @@ async def test_history_empty_with_account(
     assert body["page_size"] == 20
 
 
-# ---------------------------------------------------------------------------
-# Own-transaction visibility
-# ---------------------------------------------------------------------------
-
-
 async def test_history_returns_own_transactions(
     async_client: AsyncClient,
     db_session: AsyncSession,
     fake_redis: object,
 ) -> None:
-    """User sees both outgoing and incoming transactions; total=2.
-
-    Verifies that the OR filter on from_account_id/to_account_id correctly
-    surfaces both sides of the ledger.
-    """
+    """User sees both outgoing and incoming transactions; total=2."""
     user, token = await make_orm_user(
         db_session,
         fake_redis,
@@ -200,14 +151,12 @@ async def test_history_returns_own_transactions(
     account = await _make_account(db_session, user.id)
     other_account = await _make_account(db_session, other.id)
 
-    # Outgoing: user → other
     await _make_transaction(
         db_session,
         from_account_id=account.id,
         to_account_id=other_account.id,
         amount=Decimal("100.00"),
     )
-    # Incoming: other → user
     await _make_transaction(
         db_session,
         from_account_id=other_account.id,
@@ -225,22 +174,13 @@ async def test_history_returns_own_transactions(
     assert len(body["items"]) == 2
 
 
-# ---------------------------------------------------------------------------
-# Cross-user isolation (SR-12)
-# ---------------------------------------------------------------------------
-
-
 async def test_history_no_cross_user_leakage(
     async_client: AsyncClient,
     db_session: AsyncSession,
     fake_redis: object,
 ) -> None:
-    """User B's history does not include user A's transactions.
-
-    Security property (SR-12): account scoping must prevent horizontal access
-    to another user's financial records.  User B sees only their own empty
-    history even though user A has transactions.
-    """
+    """User B's history does not include user A's transactions;
+    SR-12 scoping enforced."""
     user_a, _ = await make_orm_user(
         db_session,
         fake_redis,
@@ -254,10 +194,8 @@ async def test_history_no_cross_user_leakage(
         session_id=f"00000000-0000-0000-bbbb-{uuid.uuid4().hex[:12]}",
     )
     account_a = await _make_account(db_session, user_a.id)
-    # user B has an account but no transactions
     await _make_account(db_session, user_b.id)
 
-    # Insert transactions that belong exclusively to user A.
     dummy_user, _ = await make_orm_user(
         db_session,
         fake_redis,
@@ -265,7 +203,7 @@ async def test_history_no_cross_user_leakage(
         session_id=f"00000000-0000-0000-cccc-{uuid.uuid4().hex[:12]}",
     )
     dummy_account = await _make_account(db_session, dummy_user.id)
-    await _make_transaction(
+    await _make_transaction(  # transactions for user A only
         db_session,
         from_account_id=account_a.id,
         to_account_id=dummy_account.id,
@@ -286,11 +224,6 @@ async def test_history_no_cross_user_leakage(
     # User B must see zero transactions — none of user A's rows should leak.
     assert body["total"] == 0
     assert body["items"] == []
-
-
-# ---------------------------------------------------------------------------
-# Pagination
-# ---------------------------------------------------------------------------
 
 
 async def test_history_pagination(
@@ -364,11 +297,6 @@ async def test_history_pagination(
     assert len(b3["items"]) == 1
     assert b3["total"] == 5
     assert b3["page"] == 3
-
-
-# ---------------------------------------------------------------------------
-# Audit log assertion (SR-16)
-# ---------------------------------------------------------------------------
 
 
 async def test_history_audit_log_written(
