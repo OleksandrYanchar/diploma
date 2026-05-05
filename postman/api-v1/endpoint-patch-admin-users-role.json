@@ -1,0 +1,36 @@
+{
+  "method": "PATCH",
+  "path": "/api/v1/admin/users/{user_id}/role",
+  "authentication": "Bearer + verified email + ADMIN role",
+  "body": {"role": "user | auditor | admin"},
+  "scenarios": {
+    "success_admin": {
+      "headers": {"Authorization": "Bearer {{access_token_admin_verified}}"},
+      "body": {"role": "auditor"},
+      "expectedStatus": 200,
+      "description": "ADMIN changes target role. Audit log includes previous_role and new_role."
+    },
+    "failure_self_role_change_403": {
+      "description": "Admin cannot change their own role. Audit log written with reason=self_role_change_blocked.",
+      "expectedStatus": 403
+    },
+    "failure_invalid_role_422": {
+      "body": {"role": "superadmin"},
+      "expectedStatus": 422,
+      "description": "Invalid role value rejected by Pydantic. No silent fallback."
+    },
+    "failure_auditor_403": {
+      "headers": {"Authorization": "Bearer {{access_token_auditor_verified}}"},
+      "expectedStatus": 403,
+      "description": "AUDITOR role is not allowed to change roles (SR-11)."
+    },
+    "failure_not_found_404": {
+      "description": "Non-existent user_id returns 404.",
+      "expectedStatus": 404
+    },
+    "failure_missing_authorization_403": {
+      "headers": {},
+      "expectedStatus": 403
+    }
+  }
+}

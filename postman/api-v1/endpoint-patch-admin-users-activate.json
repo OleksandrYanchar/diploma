@@ -1,0 +1,25 @@
+{
+  "method": "PATCH",
+  "path": "/api/v1/admin/users/{user_id}/activate",
+  "authentication": "Bearer + verified email + ADMIN role",
+  "scenarios": {
+    "success_admin": {
+      "headers": {"Authorization": "Bearer {{access_token_admin_verified}}"},
+      "expectedStatus": 200,
+      "description": "ADMIN sets is_active=true. Returns updated UserAdminView."
+    },
+    "failure_auditor_403": {
+      "headers": {"Authorization": "Bearer {{access_token_auditor_verified}}"},
+      "expectedStatus": 403,
+      "description": "AUDITOR role is not allowed to activate users (SR-11)."
+    },
+    "failure_not_found_404": {
+      "description": "Non-existent user_id returns 404.",
+      "expectedStatus": 404
+    },
+    "failure_missing_authorization_403": {
+      "headers": {},
+      "expectedStatus": 403
+    }
+  }
+}

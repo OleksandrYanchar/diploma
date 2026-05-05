@@ -51,6 +51,18 @@
       "value": ""
     },
     {
+      "key": "access_token_auditor_verified",
+      "value": ""
+    },
+    {
+      "key": "target_user_id",
+      "value": ""
+    },
+    {
+      "key": "admin_user_id",
+      "value": ""
+    },
+    {
       "key": "step_up_token",
       "value": ""
     }
@@ -2256,6 +2268,312 @@
               ]
             },
             "description": ""
+          }
+        },
+        {
+          "name": "Admin list users \u2014 admin verified (200)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/users",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "admin", "users"]
+            },
+            "description": "ADMIN role \u2014 returns all users with security metadata. Sensitive fields excluded.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [{"key": "token", "value": "{{access_token_admin_verified}}", "type": "string"}]
+            }
+          }
+        },
+        {
+          "name": "Admin list users \u2014 auditor role (403)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/users",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "admin", "users"]
+            },
+            "description": "AUDITOR role is not allowed to enumerate users (SR-11).",
+            "auth": {
+              "type": "bearer",
+              "bearer": [{"key": "token", "value": "{{access_token_auditor_verified}}", "type": "string"}]
+            }
+          }
+        },
+        {
+          "name": "Admin list users \u2014 no bearer (403)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/users",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "admin", "users"]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "Admin list audit-logs \u2014 admin verified (200)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/audit-logs",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "admin", "audit-logs"]
+            },
+            "description": "ADMIN role \u2014 returns audit log entries newest-first.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [{"key": "token", "value": "{{access_token_admin_verified}}", "type": "string"}]
+            }
+          }
+        },
+        {
+          "name": "Admin list audit-logs \u2014 auditor verified (200)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/audit-logs",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "admin", "audit-logs"]
+            },
+            "description": "AUDITOR role is allowed to read audit logs (SR-11).",
+            "auth": {
+              "type": "bearer",
+              "bearer": [{"key": "token", "value": "{{access_token_auditor_verified}}", "type": "string"}]
+            }
+          }
+        },
+        {
+          "name": "Admin list audit-logs \u2014 no bearer (403)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/audit-logs",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "admin", "audit-logs"]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "Admin list security-events \u2014 admin verified (200)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/security-events",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "admin", "security-events"]
+            },
+            "description": "ADMIN role \u2014 returns security event records newest-first.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [{"key": "token", "value": "{{access_token_admin_verified}}", "type": "string"}]
+            }
+          }
+        },
+        {
+          "name": "Admin list security-events \u2014 auditor verified (200)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/security-events",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "admin", "security-events"]
+            },
+            "description": "AUDITOR role is allowed to read security events (SR-11).",
+            "auth": {
+              "type": "bearer",
+              "bearer": [{"key": "token", "value": "{{access_token_auditor_verified}}", "type": "string"}]
+            }
+          }
+        },
+        {
+          "name": "Admin list security-events \u2014 no bearer (403)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/security-events",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "admin", "security-events"]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "Admin unlock user \u2014 admin (200)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/users/{{target_user_id}}/unlock",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "admin", "users", "{{target_user_id}}", "unlock"]
+            },
+            "description": "ADMIN clears failed_login_count and locked_until for target user.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [{"key": "token", "value": "{{access_token_admin_verified}}", "type": "string"}]
+            }
+          }
+        },
+        {
+          "name": "Admin unlock user \u2014 auditor (403)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/users/{{target_user_id}}/unlock",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "admin", "users", "{{target_user_id}}", "unlock"]
+            },
+            "description": "AUDITOR role is not allowed to unlock users (SR-11).",
+            "auth": {
+              "type": "bearer",
+              "bearer": [{"key": "token", "value": "{{access_token_auditor_verified}}", "type": "string"}]
+            }
+          }
+        },
+        {
+          "name": "Admin unlock user \u2014 not found (404)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/users/00000000-0000-0000-0000-000000000000/unlock",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "admin", "users", "00000000-0000-0000-0000-000000000000", "unlock"]
+            },
+            "description": "Non-existent target returns 404.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [{"key": "token", "value": "{{access_token_admin_verified}}", "type": "string"}]
+            }
+          }
+        },
+        {
+          "name": "Admin activate user \u2014 admin (200)",
+          "request": {
+            "method": "PATCH",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/users/{{target_user_id}}/activate",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "admin", "users", "{{target_user_id}}", "activate"]
+            },
+            "description": "ADMIN sets is_active=true on target user.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [{"key": "token", "value": "{{access_token_admin_verified}}", "type": "string"}]
+            }
+          }
+        },
+        {
+          "name": "Admin deactivate user \u2014 admin (200)",
+          "request": {
+            "method": "PATCH",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/users/{{target_user_id}}/deactivate",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "admin", "users", "{{target_user_id}}", "deactivate"]
+            },
+            "description": "ADMIN sets is_active=false on target user.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [{"key": "token", "value": "{{access_token_admin_verified}}", "type": "string"}]
+            }
+          }
+        },
+        {
+          "name": "Admin deactivate user \u2014 self (403)",
+          "request": {
+            "method": "PATCH",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/users/{{admin_user_id}}/deactivate",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "admin", "users", "{{admin_user_id}}", "deactivate"]
+            },
+            "description": "Admin cannot deactivate their own account (self-guard).",
+            "auth": {
+              "type": "bearer",
+              "bearer": [{"key": "token", "value": "{{access_token_admin_verified}}", "type": "string"}]
+            }
+          }
+        },
+        {
+          "name": "Admin change role \u2014 admin (200)",
+          "request": {
+            "method": "PATCH",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"role\": \"auditor\"}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/users/{{target_user_id}}/role",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "admin", "users", "{{target_user_id}}", "role"]
+            },
+            "description": "ADMIN changes target user role. Audit log includes previous_role and new_role.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [{"key": "token", "value": "{{access_token_admin_verified}}", "type": "string"}]
+            }
+          }
+        },
+        {
+          "name": "Admin change role \u2014 self (403)",
+          "request": {
+            "method": "PATCH",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"role\": \"user\"}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/users/{{admin_user_id}}/role",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "admin", "users", "{{admin_user_id}}", "role"]
+            },
+            "description": "Admin cannot change their own role (self-guard).",
+            "auth": {
+              "type": "bearer",
+              "bearer": [{"key": "token", "value": "{{access_token_admin_verified}}", "type": "string"}]
+            }
+          }
+        },
+        {
+          "name": "Admin change role \u2014 invalid role (422)",
+          "request": {
+            "method": "PATCH",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"role\": \"superadmin\"}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/users/{{target_user_id}}/role",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "admin", "users", "{{target_user_id}}", "role"]
+            },
+            "description": "Invalid role value rejected by Pydantic with 422.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [{"key": "token", "value": "{{access_token_admin_verified}}", "type": "string"}]
+            }
           }
         }
       ]

@@ -107,6 +107,23 @@ def promote_to_admin(
     return "UPDATE 1" in out
 
 
+def promote_to_auditor(
+    email: str,
+    pg_user: str,
+    pg_password: str,
+    pg_db: str,
+) -> bool:
+    if not isinstance(email, str) or any(c in email for c in ("'", ";", "--")):
+        raise ValueError(f"Unsafe email value for auditor promotion: {email!r}")
+    out = psql_exec(
+        f"UPDATE users SET role='auditor' WHERE email='{email}';",
+        pg_user,
+        pg_password,
+        pg_db,
+    )
+    return "UPDATE 1" in out
+
+
 def set_account_status(
     account_number: str,
     status: str,  # "ACTIVE" | "INACTIVE" | "FROZEN"
