@@ -1,0 +1,39 @@
+{
+  "method": "GET",
+  "path": "/api/v1/admin/security-events",
+  "authentication": "Bearer + verified email + ADMIN or AUDITOR role",
+  "query_params": {
+    "limit": "1–200, default 50",
+    "offset": "≥ 0, default 0"
+  },
+  "headers": {
+    "Authorization": "Bearer {{access_token_admin_verified}}"
+  },
+  "scenarios": {
+    "success_admin_verified": {
+      "headers": {
+        "Authorization": "Bearer {{access_token_admin_verified}}"
+      },
+      "expectedStatus": 200,
+      "description": "ADMIN role — returns list of security event records."
+    },
+    "success_auditor_verified": {
+      "description": "AUDITOR role is allowed to read security events (SR-11).",
+      "headers": {
+        "Authorization": "Bearer {{access_token_auditor_verified}}"
+      },
+      "expectedStatus": 200
+    },
+    "failure_customer_forbidden_403": {
+      "description": "USER role is not allowed to read security events (SR-11).",
+      "headers": {
+        "Authorization": "Bearer {{access_token_customer_verified}}"
+      },
+      "expectedStatus": 403
+    },
+    "failure_missing_authorization_403": {
+      "headers": {},
+      "expectedStatus": 403
+    }
+  }
+}

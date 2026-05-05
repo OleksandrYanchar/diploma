@@ -51,6 +51,10 @@
       "value": ""
     },
     {
+      "key": "access_token_auditor_verified",
+      "value": ""
+    },
+    {
       "key": "step_up_token",
       "value": ""
     }
@@ -2254,6 +2258,147 @@
                 "admin",
                 "ping"
               ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "Admin list users \u2014 admin verified (200)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/users",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "admin", "users"]
+            },
+            "description": "ADMIN role \u2014 returns all users with security metadata. Sensitive fields excluded.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [{"key": "token", "value": "{{access_token_admin_verified}}", "type": "string"}]
+            }
+          }
+        },
+        {
+          "name": "Admin list users \u2014 auditor role (403)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/users",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "admin", "users"]
+            },
+            "description": "AUDITOR role is not allowed to enumerate users (SR-11).",
+            "auth": {
+              "type": "bearer",
+              "bearer": [{"key": "token", "value": "{{access_token_auditor_verified}}", "type": "string"}]
+            }
+          }
+        },
+        {
+          "name": "Admin list users \u2014 no bearer (403)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/users",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "admin", "users"]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "Admin list audit-logs \u2014 admin verified (200)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/audit-logs",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "admin", "audit-logs"]
+            },
+            "description": "ADMIN role \u2014 returns audit log entries newest-first.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [{"key": "token", "value": "{{access_token_admin_verified}}", "type": "string"}]
+            }
+          }
+        },
+        {
+          "name": "Admin list audit-logs \u2014 auditor verified (200)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/audit-logs",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "admin", "audit-logs"]
+            },
+            "description": "AUDITOR role is allowed to read audit logs (SR-11).",
+            "auth": {
+              "type": "bearer",
+              "bearer": [{"key": "token", "value": "{{access_token_auditor_verified}}", "type": "string"}]
+            }
+          }
+        },
+        {
+          "name": "Admin list audit-logs \u2014 no bearer (403)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/audit-logs",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "admin", "audit-logs"]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "Admin list security-events \u2014 admin verified (200)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/security-events",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "admin", "security-events"]
+            },
+            "description": "ADMIN role \u2014 returns security event records newest-first.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [{"key": "token", "value": "{{access_token_admin_verified}}", "type": "string"}]
+            }
+          }
+        },
+        {
+          "name": "Admin list security-events \u2014 auditor verified (200)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/security-events",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "admin", "security-events"]
+            },
+            "description": "AUDITOR role is allowed to read security events (SR-11).",
+            "auth": {
+              "type": "bearer",
+              "bearer": [{"key": "token", "value": "{{access_token_auditor_verified}}", "type": "string"}]
+            }
+          }
+        },
+        {
+          "name": "Admin list security-events \u2014 no bearer (403)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/security-events",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "admin", "security-events"]
             },
             "description": ""
           }

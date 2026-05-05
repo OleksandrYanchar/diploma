@@ -60,13 +60,13 @@ from docker_helpers import (  # noqa: E402
     extract_demo_token,
     fetch_container_logs,
     promote_to_admin,
+    promote_to_auditor,
     read_env_file,
     run_migrations,
     set_account_balance,
     set_account_status,
     start_docker_stack,
 )
-
 
 RESULT_PASS = "PASS"
 RESULT_FAIL = "FAIL"
@@ -798,7 +798,7 @@ class VerificationRunner:
                 response_body=_sanitize(setup_body),
                 result=RESULT_PASS, notes="secret extracted for TOTP; redacted in artifact",
             ))
-            print(f"  ✓ [PASS   ] POST   /auth/mfa/setup                                    200")
+            print("  ✓ [PASS   ] POST   /auth/mfa/setup                                    200")
         else:
             self.results.append(ScenarioResult(
                 timestamp=datetime.now(timezone.utc).isoformat(),
@@ -1029,6 +1029,182 @@ class VerificationRunner:
                     headers={"Authorization": f"Bearer {access_uv}"},
                     expected=403,
                 )
+
+        if access_admin:
+            ctx["access_admin"] = access_admin
+
+        return ctx
+
+    async def _run_admin_api(self, ctx: dict[str, Any]) -> dict[str, Any]:
+        print("\n─── Admin Read-Only API ──────────────────────────────────────")
+        pg_user, pg_pw, pg_db = self._pg()
+
+        access_admin = ctx.get("access_admin")
+        access_user = ctx.get("access_a")
+
+        email_auditor = self._email("auditor_user")
+        access_auditor: str | None = None
+        r_aud_reg, _ = await self._req(
+            "POST", "/auth/register",
+            flow="admin_api", branch="auditor_setup",
+            name="register auditor test user",
+            json_body={"email": email_auditor, "password": "StrongPass1!"},
+            expected=201,
+        )
+        if r_aud_reg.result == RESULT_PASS:
+            await self._wait_for_logs()
+            vt = extract_demo_token(email_auditor, "Email verification")
+            if vt:
+                await self._req(
+                    "GET", "/auth/verify-email",
+                    flow="admin_api", branch="auditor_setup",
+                    name="verify auditor user email",
+                    params={"token": vt},
+                    expected=200,
+                )
+            promoted = promote_to_auditor(email_auditor, pg_user, pg_pw, pg_db)
+            if not promoted:
+                self._blocked("admin_api", "auditor_setup",
+                              "promote user to auditor",
+                              "Could not promote user to auditor via psql")
+            else:
+                r_aud_login, body_aud = await self._req(
+                    "POST", "/auth/login",
+                    flow="admin_api", branch="auditor_login",
+                    name="login auditor user after role promotion",
+                    json_body={"email": email_auditor, "password": "StrongPass1!"},
+                    expected=200,
+                )
+                if r_aud_login.result == RESULT_PASS and isinstance(body_aud, dict):
+                    access_auditor = body_aud.get("access_token")
+
+        if access_admin:
+            await self._req(
+                "GET", "/admin/users",
+                flow="admin_api", branch="list_users_admin",
+                name="GET /admin/users as ADMIN → 200",
+                headers={"Authorization": f"Bearer {access_admin}"},
+                expected=200,
+            )
+        else:
+            self._blocked("admin_api", "list_users_admin",
+                          "GET /admin/users as ADMIN",
+                          "No admin access token available")
+
+        if access_auditor:
+            await self._req(
+                "GET", "/admin/users",
+                flow="admin_api", branch="list_users_auditor_forbidden",
+                name="GET /admin/users as AUDITOR → 403",
+                headers={"Authorization": f"Bearer {access_auditor}"},
+                expected=403,
+            )
+        else:
+            self._blocked("admin_api", "list_users_auditor_forbidden",
+                          "GET /admin/users as AUDITOR",
+                          "No auditor access token available")
+
+        if access_user:
+            await self._req(
+                "GET", "/admin/users",
+                flow="admin_api", branch="list_users_user_forbidden",
+                name="GET /admin/users as USER → 403",
+                headers={"Authorization": f"Bearer {access_user}"},
+                expected=403,
+            )
+
+        await self._req(
+            "GET", "/admin/users",
+            flow="admin_api", branch="list_users_unauthenticated",
+            name="GET /admin/users unauthenticated → 403",
+            expected=403,
+        )
+
+        # ── GET /admin/audit-logs ─────────────────────────────────────────────
+        if access_admin:
+            await self._req(
+                "GET", "/admin/audit-logs",
+                flow="admin_api", branch="list_audit_logs_admin",
+                name="GET /admin/audit-logs as ADMIN → 200",
+                headers={"Authorization": f"Bearer {access_admin}"},
+                expected=200,
+            )
+        else:
+            self._blocked("admin_api", "list_audit_logs_admin",
+                          "GET /admin/audit-logs as ADMIN",
+                          "No admin access token available")
+
+        if access_auditor:
+            await self._req(
+                "GET", "/admin/audit-logs",
+                flow="admin_api", branch="list_audit_logs_auditor",
+                name="GET /admin/audit-logs as AUDITOR → 200",
+                headers={"Authorization": f"Bearer {access_auditor}"},
+                expected=200,
+            )
+        else:
+            self._blocked("admin_api", "list_audit_logs_auditor",
+                          "GET /admin/audit-logs as AUDITOR",
+                          "No auditor access token available")
+
+        if access_user:
+            await self._req(
+                "GET", "/admin/audit-logs",
+                flow="admin_api", branch="list_audit_logs_user_forbidden",
+                name="GET /admin/audit-logs as USER → 403",
+                headers={"Authorization": f"Bearer {access_user}"},
+                expected=403,
+            )
+
+        await self._req(
+            "GET", "/admin/audit-logs",
+            flow="admin_api", branch="list_audit_logs_unauthenticated",
+            name="GET /admin/audit-logs unauthenticated → 403",
+            expected=403,
+        )
+
+        # ── GET /admin/security-events ────────────────────────────────────────
+        if access_admin:
+            await self._req(
+                "GET", "/admin/security-events",
+                flow="admin_api", branch="list_security_events_admin",
+                name="GET /admin/security-events as ADMIN → 200",
+                headers={"Authorization": f"Bearer {access_admin}"},
+                expected=200,
+            )
+        else:
+            self._blocked("admin_api", "list_security_events_admin",
+                          "GET /admin/security-events as ADMIN",
+                          "No admin access token available")
+
+        if access_auditor:
+            await self._req(
+                "GET", "/admin/security-events",
+                flow="admin_api", branch="list_security_events_auditor",
+                name="GET /admin/security-events as AUDITOR → 200",
+                headers={"Authorization": f"Bearer {access_auditor}"},
+                expected=200,
+            )
+        else:
+            self._blocked("admin_api", "list_security_events_auditor",
+                          "GET /admin/security-events as AUDITOR",
+                          "No auditor access token available")
+
+        if access_user:
+            await self._req(
+                "GET", "/admin/security-events",
+                flow="admin_api", branch="list_security_events_user_forbidden",
+                name="GET /admin/security-events as USER → 403",
+                headers={"Authorization": f"Bearer {access_user}"},
+                expected=403,
+            )
+
+        await self._req(
+            "GET", "/admin/security-events",
+            flow="admin_api", branch="list_security_events_unauthenticated",
+            name="GET /admin/security-events unauthenticated → 403",
+            expected=403,
+        )
 
         return ctx
 
@@ -1381,6 +1557,7 @@ class VerificationRunner:
             if not self.smoke_only:
                 ctx = await self._run_mfa(ctx)
                 ctx = await self._run_rbac(ctx)
+                ctx = await self._run_admin_api(ctx)
                 ctx = await self._run_accounts_and_transfers(ctx)
                 await self._run_history(ctx)
             else:
@@ -1572,7 +1749,7 @@ def main() -> None:
     output_dir: Path = Path(args.output_dir) / ts
     env = read_env_file(_REPO_ROOT)
 
-    print(f"\nZero Trust platform — local verification runner")
+    print("\nZero Trust platform — local verification runner")
     print(f"Base URL : {args.base_url}")
     print(f"Output   : {output_dir}")
     print(f"Smoke    : {args.smoke_only}")
