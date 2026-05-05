@@ -971,6 +971,16 @@ class VerificationRunner:
                 )
                 if r_adm_login.result == RESULT_PASS and isinstance(body_adm, dict):
                     access_admin = body_adm.get("access_token")
+                    if access_admin:
+                        r_me, body_me = await self._req(
+                            "GET", "/users/me",
+                            flow="rbac", branch="admin_user_me",
+                            name="GET /users/me as admin to capture admin id",
+                            headers={"Authorization": f"Bearer {access_admin}"},
+                            expected=200,
+                        )
+                        if r_me.result == RESULT_PASS and isinstance(body_me, dict):
+                            ctx["access_admin_id"] = body_me.get("id")
 
         # admin ping as regular user (403)
         if ctx.get("access_a"):
@@ -1205,6 +1215,138 @@ class VerificationRunner:
             name="GET /admin/security-events unauthenticated → 403",
             expected=403,
         )
+
+        email_target = self._email("admin_target_user")
+        target_user_id: str | None = None
+        r_tgt_reg, body_tgt_reg = await self._req(
+            "POST", "/auth/register",
+            flow="admin_api", branch="target_user_setup",
+            name="register target user for mutating admin ops",
+            json_body={"email": email_target, "password": "StrongPass1!"},
+            expected=201,
+        )
+        if r_tgt_reg.result == RESULT_PASS and isinstance(body_tgt_reg, dict):
+            target_user_id = body_tgt_reg.get("id")
+            await self._wait_for_logs()
+            vt = extract_demo_token(email_target, "Email verification")
+            if vt:
+                await self._req(
+                    "GET", "/auth/verify-email",
+                    flow="admin_api", branch="target_user_setup",
+                    name="verify target user email",
+                    params={"token": vt},
+                    expected=200,
+                )
+
+        # ── unlock ────────────────────────────────────────────────────────────
+        if access_admin and target_user_id:
+            await self._req(
+                "POST", f"/admin/users/{target_user_id}/unlock",
+                flow="admin_api", branch="unlock_success",
+                name="POST /admin/users/{id}/unlock as ADMIN → 200",
+                headers={"Authorization": f"Bearer {access_admin}"},
+                expected=200,
+            )
+        else:
+            self._blocked("admin_api", "unlock_success",
+                          "unlock target user",
+                          "No admin token or target user id available")
+
+        if access_auditor and target_user_id:
+            await self._req(
+                "POST", f"/admin/users/{target_user_id}/unlock",
+                flow="admin_api", branch="unlock_auditor_forbidden",
+                name="POST /admin/users/{id}/unlock as AUDITOR → 403",
+                headers={"Authorization": f"Bearer {access_auditor}"},
+                expected=403,
+            )
+
+        if access_admin:
+            await self._req(
+                "POST", "/admin/users/00000000-0000-0000-0000-000000000000/unlock",
+                flow="admin_api", branch="unlock_not_found",
+                name="POST /admin/users/{id}/unlock non-existent → 404",
+                headers={"Authorization": f"Bearer {access_admin}"},
+                expected=404,
+            )
+
+        if access_admin and target_user_id:
+            await self._req(
+                "PATCH", f"/admin/users/{target_user_id}/deactivate",
+                flow="admin_api", branch="deactivate_success",
+                name="PATCH /admin/users/{id}/deactivate as ADMIN → 200",
+                headers={"Authorization": f"Bearer {access_admin}"},
+                expected=200,
+            )
+            await self._req(
+                "PATCH", f"/admin/users/{target_user_id}/activate",
+                flow="admin_api", branch="activate_success",
+                name="PATCH /admin/users/{id}/activate as ADMIN → 200",
+                headers={"Authorization": f"Bearer {access_admin}"},
+                expected=200,
+            )
+        else:
+            self._blocked("admin_api", "deactivate_success",
+                          "deactivate target user",
+                          "No admin token or target user id available")
+            self._blocked("admin_api", "activate_success",
+                          "activate target user",
+                          "No admin token or target user id available")
+
+        # self-deactivation guard
+        if access_admin:
+            admin_id = ctx.get("access_admin_id")
+            if admin_id:
+                await self._req(
+                    "PATCH", f"/admin/users/{admin_id}/deactivate",
+                    flow="admin_api", branch="deactivate_self_forbidden",
+                    name="PATCH /admin/users/{id}/deactivate self → 403",
+                    headers={"Authorization": f"Bearer {access_admin}"},
+                    expected=403,
+                )
+            else:
+                self._blocked("admin_api", "deactivate_self_forbidden",
+                              "deactivate self guard",
+                              "No admin_id stored in ctx")
+
+        if access_admin and target_user_id:
+            await self._req(
+                "PATCH", f"/admin/users/{target_user_id}/role",
+                flow="admin_api", branch="role_change_success",
+                name="PATCH /admin/users/{id}/role user→auditor → 200",
+                headers={"Authorization": f"Bearer {access_admin}"},
+                json_body={"role": "auditor"},
+                expected=200,
+            )
+            await self._req(
+                "PATCH", f"/admin/users/{target_user_id}/role",
+                flow="admin_api", branch="role_change_invalid",
+                name="PATCH /admin/users/{id}/role invalid role → 422",
+                headers={"Authorization": f"Bearer {access_admin}"},
+                json_body={"role": "superadmin"},
+                expected=422,
+            )
+        else:
+            self._blocked("admin_api", "role_change_success",
+                          "change target user role",
+                          "No admin token or target user id available")
+
+        # self-role-change guard
+        if access_admin:
+            admin_id = ctx.get("access_admin_id")
+            if admin_id:
+                await self._req(
+                    "PATCH", f"/admin/users/{admin_id}/role",
+                    flow="admin_api", branch="role_change_self_forbidden",
+                    name="PATCH /admin/users/{id}/role self → 403",
+                    headers={"Authorization": f"Bearer {access_admin}"},
+                    json_body={"role": "user"},
+                    expected=403,
+                )
+            else:
+                self._blocked("admin_api", "role_change_self_forbidden",
+                              "role change self guard",
+                              "No admin_id stored in ctx")
 
         return ctx
 

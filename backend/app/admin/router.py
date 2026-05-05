@@ -14,7 +14,9 @@ Security properties:
   query parameters; defaults are 50 and 0 respectively.
 """
 
-from fastapi import APIRouter, Depends, Query
+import uuid
+
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.admin import service
@@ -22,7 +24,7 @@ from app.core.database import get_db
 from app.dependencies.auth import get_current_user, require_role, require_verified
 from app.models.user import User, UserRole
 from app.schemas.admin import AuditLogResponse, SecurityEventResponse
-from app.schemas.user import UserAdminView
+from app.schemas.user import UserAdminView, UserUpdateRole
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -145,3 +147,122 @@ async def list_security_events(
     """
     events = await service.list_security_events(db=db, limit=limit, offset=offset)
     return [SecurityEventResponse.model_validate(event) for event in events]
+
+
+@router.post(
+    "/users/{user_id}/unlock",
+    response_model=UserAdminView,
+    status_code=200,
+    summary="Unlock a user account (ADMIN only)",
+)
+async def unlock_user(
+    user_id: uuid.UUID,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    _verified: None = Depends(require_verified),
+    _admin: None = Depends(require_role(UserRole.ADMIN)),
+    db: AsyncSession = Depends(get_db),
+) -> UserAdminView:
+    """Reset ``failed_login_count`` and ``locked_until`` on the target user.
+
+    Raises:
+        HTTPException 401/403: Unauthenticated, unverified, or wrong role.
+        HTTPException 404: Target user does not exist.
+    """
+    ip = request.client.host if request.client else None
+    user = await service.unlock_user(
+        db=db, actor=current_user, user_id=user_id, ip_address=ip
+    )
+    return UserAdminView.model_validate(user)
+
+
+@router.patch(
+    "/users/{user_id}/activate",
+    response_model=UserAdminView,
+    status_code=200,
+    summary="Activate a user account (ADMIN only)",
+)
+async def activate_user(
+    user_id: uuid.UUID,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    _verified: None = Depends(require_verified),
+    _admin: None = Depends(require_role(UserRole.ADMIN)),
+    db: AsyncSession = Depends(get_db),
+) -> UserAdminView:
+    """Set ``is_active = True`` on the target user.
+
+    Raises:
+        HTTPException 401/403: Unauthenticated, unverified, or wrong role.
+        HTTPException 404: Target user does not exist.
+    """
+    ip = request.client.host if request.client else None
+    user = await service.activate_user(
+        db=db, actor=current_user, user_id=user_id, ip_address=ip
+    )
+    return UserAdminView.model_validate(user)
+
+
+@router.patch(
+    "/users/{user_id}/deactivate",
+    response_model=UserAdminView,
+    status_code=200,
+    summary="Deactivate a user account (ADMIN only)",
+)
+async def deactivate_user(
+    user_id: uuid.UUID,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    _verified: None = Depends(require_verified),
+    _admin: None = Depends(require_role(UserRole.ADMIN)),
+    db: AsyncSession = Depends(get_db),
+) -> UserAdminView:
+    """Set ``is_active = False`` on the target user.
+
+    Raises:
+        HTTPException 401/403: Unauthenticated, unverified, or wrong role.
+        HTTPException 403: Admin attempted to deactivate their own account.
+        HTTPException 404: Target user does not exist.
+    """
+    ip = request.client.host if request.client else None
+    user = await service.deactivate_user(
+        db=db, actor=current_user, user_id=user_id, ip_address=ip
+    )
+    return UserAdminView.model_validate(user)
+
+
+@router.patch(
+    "/users/{user_id}/role",
+    response_model=UserAdminView,
+    status_code=200,
+    summary="Change a user's role (ADMIN only)",
+)
+async def change_user_role(
+    user_id: uuid.UUID,
+    body: UserUpdateRole,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    _verified: None = Depends(require_verified),
+    _admin: None = Depends(require_role(UserRole.ADMIN)),
+    db: AsyncSession = Depends(get_db),
+) -> UserAdminView:
+    """Change the role of the target user.
+
+    Invalid role values are rejected by Pydantic (422). Audit log includes
+    the previous and new role on success.
+
+    Raises:
+        HTTPException 401/403: Unauthenticated, unverified, or wrong role.
+        HTTPException 403: Admin attempted to change their own role.
+        HTTPException 404: Target user does not exist.
+        HTTPException 422: ``role`` value is not a valid ``UserRole``.
+    """
+    ip = request.client.host if request.client else None
+    user = await service.change_user_role(
+        db=db,
+        actor=current_user,
+        user_id=user_id,
+        new_role=body.role,
+        ip_address=ip,
+    )
+    return UserAdminView.model_validate(user)

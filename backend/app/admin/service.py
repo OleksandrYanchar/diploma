@@ -11,12 +11,15 @@ Security properties:
   top of the default view without client-side sorting.
 """
 
+import uuid
+
+from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.audit_log import AuditLog
 from app.models.security_event import SecurityEvent
-from app.models.user import User
+from app.models.user import User, UserRole
 
 
 async def list_users(
@@ -95,3 +98,240 @@ async def list_security_events(
         .offset(offset)
     )
     return list(result.scalars().all())
+
+
+async def unlock_user(
+    db: AsyncSession,
+    actor: User,
+    user_id: uuid.UUID,
+    ip_address: str | None,
+) -> User:
+    """Clear the lockout state of a target user (ADMIN action).
+
+    Resets ``failed_login_count`` to 0 and ``locked_until`` to None.
+    Emits an audit log entry for both success and failure outcomes.
+
+    Raises:
+        HTTPException 404: Target user does not exist.
+    """
+    result = await db.execute(select(User).where(User.id == user_id))
+    target: User | None = result.scalar_one_or_none()
+
+    if target is None:
+        db.add(
+            AuditLog(
+                user_id=None,
+                action="ADMIN_UNLOCK_USER",
+                ip_address=ip_address,
+                details={
+                    "actor_id": str(actor.id),
+                    "target_id": str(user_id),
+                    "result": "failure",
+                    "reason": "user_not_found",
+                },
+            )
+        )
+        await db.commit()
+        raise HTTPException(status_code=404, detail="User not found")
+
+    target.failed_login_count = 0
+    target.locked_until = None
+    db.add(
+        AuditLog(
+            user_id=target.id,
+            action="ADMIN_UNLOCK_USER",
+            ip_address=ip_address,
+            details={"actor_id": str(actor.id), "result": "success"},
+        )
+    )
+    await db.commit()
+    await db.refresh(target)
+    return target
+
+
+async def activate_user(
+    db: AsyncSession,
+    actor: User,
+    user_id: uuid.UUID,
+    ip_address: str | None,
+) -> User:
+    """Set ``is_active = True`` on a target user (ADMIN action).
+
+    Emits an audit log entry for both success and failure outcomes.
+
+    Raises:
+        HTTPException 404: Target user does not exist.
+    """
+    result = await db.execute(select(User).where(User.id == user_id))
+    target: User | None = result.scalar_one_or_none()
+
+    if target is None:
+        db.add(
+            AuditLog(
+                user_id=None,
+                action="ADMIN_ACTIVATE_USER",
+                ip_address=ip_address,
+                details={
+                    "actor_id": str(actor.id),
+                    "target_id": str(user_id),
+                    "result": "failure",
+                    "reason": "user_not_found",
+                },
+            )
+        )
+        await db.commit()
+        raise HTTPException(status_code=404, detail="User not found")
+
+    target.is_active = True
+    db.add(
+        AuditLog(
+            user_id=target.id,
+            action="ADMIN_ACTIVATE_USER",
+            ip_address=ip_address,
+            details={"actor_id": str(actor.id), "result": "success"},
+        )
+    )
+    await db.commit()
+    await db.refresh(target)
+    return target
+
+
+async def deactivate_user(
+    db: AsyncSession,
+    actor: User,
+    user_id: uuid.UUID,
+    ip_address: str | None,
+) -> User:
+    """Set ``is_active = False`` on a target user (ADMIN action).
+
+    Emits an audit log entry for success, 404, and self-guard failure.
+
+    Raises:
+        HTTPException 404: Target user does not exist.
+        HTTPException 403: Admin attempted to deactivate their own account.
+    """
+    result = await db.execute(select(User).where(User.id == user_id))
+    target: User | None = result.scalar_one_or_none()
+
+    if target is None:
+        db.add(
+            AuditLog(
+                user_id=None,
+                action="ADMIN_DEACTIVATE_USER",
+                ip_address=ip_address,
+                details={
+                    "actor_id": str(actor.id),
+                    "target_id": str(user_id),
+                    "result": "failure",
+                    "reason": "user_not_found",
+                },
+            )
+        )
+        await db.commit()
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if actor.id == target.id:
+        db.add(
+            AuditLog(
+                user_id=target.id,
+                action="ADMIN_DEACTIVATE_USER",
+                ip_address=ip_address,
+                details={
+                    "actor_id": str(actor.id),
+                    "result": "failure",
+                    "reason": "self_deactivation_blocked",
+                },
+            )
+        )
+        await db.commit()
+        raise HTTPException(
+            status_code=403,
+            detail="Cannot deactivate your own account",
+        )
+
+    target.is_active = False
+    db.add(
+        AuditLog(
+            user_id=target.id,
+            action="ADMIN_DEACTIVATE_USER",
+            ip_address=ip_address,
+            details={"actor_id": str(actor.id), "result": "success"},
+        )
+    )
+    await db.commit()
+    await db.refresh(target)
+    return target
+
+
+async def change_user_role(
+    db: AsyncSession,
+    actor: User,
+    user_id: uuid.UUID,
+    new_role: UserRole,
+    ip_address: str | None,
+) -> User:
+    """Change the role of a target user (ADMIN action).
+
+    Audit log details include ``previous_role`` and ``new_role`` on success.
+
+    Raises:
+        HTTPException 404: Target user does not exist.
+        HTTPException 403: Admin attempted to change their own role.
+    """
+    result = await db.execute(select(User).where(User.id == user_id))
+    target: User | None = result.scalar_one_or_none()
+
+    if target is None:
+        db.add(
+            AuditLog(
+                user_id=None,
+                action="ADMIN_ROLE_CHANGE",
+                ip_address=ip_address,
+                details={
+                    "actor_id": str(actor.id),
+                    "target_id": str(user_id),
+                    "result": "failure",
+                    "reason": "user_not_found",
+                },
+            )
+        )
+        await db.commit()
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if actor.id == target.id:
+        db.add(
+            AuditLog(
+                user_id=target.id,
+                action="ADMIN_ROLE_CHANGE",
+                ip_address=ip_address,
+                details={
+                    "actor_id": str(actor.id),
+                    "result": "failure",
+                    "reason": "self_role_change_blocked",
+                },
+            )
+        )
+        await db.commit()
+        raise HTTPException(
+            status_code=403,
+            detail="Cannot change your own role",
+        )
+
+    previous_role = target.role.value
+    target.role = new_role
+    db.add(
+        AuditLog(
+            user_id=target.id,
+            action="ADMIN_ROLE_CHANGE",
+            ip_address=ip_address,
+            details={
+                "actor_id": str(actor.id),
+                "previous_role": previous_role,
+                "new_role": new_role.value,
+                "result": "success",
+            },
+        )
+    )
+    await db.commit()
+    await db.refresh(target)
+    return target
