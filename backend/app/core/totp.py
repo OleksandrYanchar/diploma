@@ -8,8 +8,6 @@ It is a thin wrapper over pyotp and qrcode that enforces consistent
 security parameters across the codebase.
 """
 
-from __future__ import annotations
-
 import base64
 import io
 
@@ -19,8 +17,6 @@ import qrcode
 
 def generate_totp_secret() -> str:
     """Generate a cryptographically random TOTP secret.
-
-    Expects: nothing.
 
     Returns: a Base32-encoded string produced by pyotp.random_base32(),
     which uses os.urandom internally, providing 160 bits of entropy

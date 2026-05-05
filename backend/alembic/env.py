@@ -32,27 +32,25 @@ from __future__ import annotations
 
 import asyncio
 import os
-from pathlib import Path
 from logging.config import fileConfig
+from pathlib import Path
 
-from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+import app.models  # noqa: F401 — side-effect import registers all ORM models
+from alembic import context
+
 # Import Base so that all models' metadata is accessible to Alembic.
 # The models/__init__.py import ensures every ORM class has been loaded.
 from app.core.database import Base
-import app.models  # noqa: F401 — side-effect import registers all ORM models
 
-# Alembic Config object providing access to alembic.ini.
 config = context.config
 
-# Apply Python logging configuration from alembic.ini.
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# The metadata object that autogenerate inspects to detect schema changes.
 target_metadata = Base.metadata
 
 

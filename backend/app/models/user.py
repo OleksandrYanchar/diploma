@@ -13,8 +13,6 @@ Security properties:
   is never returned to the client after the initial setup response (SR-04).
 """
 
-from __future__ import annotations
-
 import enum
 import uuid
 from datetime import datetime
@@ -48,7 +46,6 @@ class User(Base):
 
     __tablename__ = "users"
 
-    # Primary key: UUID v4, generated server-side to avoid enumerable IDs.
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         primary_key=True,
@@ -56,7 +53,6 @@ class User(Base):
         nullable=False,
     )
 
-    # Unique email address used for login and verification.
     email: Mapped[str] = mapped_column(
         String(320),  # RFC 5321 maximum email length
         unique=True,
@@ -64,34 +60,29 @@ class User(Base):
         nullable=False,
     )
 
-    # Argon2id hash of the user's password.  Raw password is NEVER stored.
     hashed_password: Mapped[str] = mapped_column(
         String(1024),
         nullable=False,
     )
 
-    # RBAC role.  Defaults to USER (least privilege).
     role: Mapped[UserRole] = mapped_column(
         Enum(UserRole, name="userrole", values_callable=lambda e: [m.value for m in e]),
         nullable=False,
-        default=UserRole.USER,
+        default=UserRole.USER,  # Default least privileged role
     )
 
-    # Soft-delete / deactivation flag.  Deactivated users cannot log in.
     is_active: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
         default=True,
     )
 
-    # Email verification status (SR-03).
     is_verified: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
         default=False,
     )
 
-    # MFA state (SR-04).
     mfa_enabled: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
@@ -99,62 +90,48 @@ class User(Base):
     )
 
     # Base32-encoded TOTP secret.  Null until MFA enrollment is completed.
-    # In production this should be encrypted at rest.
     mfa_secret: Mapped[str | None] = mapped_column(
         String(64),
         nullable=True,
         default=None,
     )
 
-    # Consecutive failed login count for account lockout (SR-05).
     failed_login_count: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
         default=0,
     )
 
-    # Timestamp until which the account is locked.  Null means not locked.
     locked_until: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
         default=None,
     )
 
-    # SHA-256 hash of the one-time email verification token (SR-03).
-    # The raw token is logged to console in demo mode; only the hash is stored.
-    # Set to None after successful verification.
     email_verification_token_hash: Mapped[str | None] = mapped_column(
         String(64),
         nullable=True,
         default=None,
     )
 
-    # SHA-256 hash of the one-time password reset token (SR-18).
-    # Raw token is logged to console in demo mode; only the hash is stored.
-    # Cleared (set to None) after successful reset.
     password_reset_token_hash: Mapped[str | None] = mapped_column(
         String(64),
         nullable=True,
         default=None,
     )
 
-    # Timestamp when the password reset token was issued (SR-18).
-    # Used to enforce the 30-minute expiry window.
     password_reset_sent_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
         default=None,
     )
 
-    # Timestamp when the verification email was last sent (SR-03).
-    # Deferred from Phase 2 per ADR-15; used to rate-limit re-send requests.
     email_verification_sent_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
         default=None,
     )
 
-    # Audit timestamps.
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -168,7 +145,6 @@ class User(Base):
         onupdate=func.now(),
     )
 
-    # Relationships — defined here for ORM convenience; not loaded eagerly.
     accounts: Mapped[list["Account"]] = relationship(  # noqa: F821
         "Account",
         back_populates="user",

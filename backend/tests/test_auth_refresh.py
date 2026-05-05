@@ -12,8 +12,6 @@ a valid session before exercising the refresh endpoint.  Each test is fully
 isolated via the ``async_client`` fixture (fresh SQLite + FakeRedis per test).
 """
 
-from __future__ import annotations
-
 import uuid
 from datetime import datetime, timezone
 
@@ -45,22 +43,13 @@ async def _test_protected_refresh(
     return {"user_id": str(current_user.id)}
 
 
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_refresh_returns_new_tokens(
     async_client: AsyncClient,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """POST /auth/refresh returns 200 with a new access_token and refresh_token.
-
-    The response tokens must differ from the originals: the access token carries
-    a new JWT payload (different JTI, new session_id) and the refresh token is a
-    new opaque value (SR-07).
-    """
+    """POST /auth/refresh returns 200 with a new access_token
+    and refresh_token (SR-07)."""
     email = "refresh_new_tokens@example.com"
     _, orig_access, orig_refresh = await register_verify_login(
         async_client, capsys, email
@@ -79,11 +68,9 @@ async def test_refresh_returns_new_tokens(
     assert data["token_type"] == "bearer"
     assert data["expires_in"] > 0
 
-    # Both tokens must be distinct from the originals.
     assert data["access_token"] != orig_access, "New access token must differ"
     assert data["refresh_token"] != orig_refresh, "New refresh token must differ"
 
-    # The new access token must decode to a valid JWT payload.
     settings = Settings()  # type: ignore[call-arg]
     decoded = pyjwt.decode(
         data["access_token"],
@@ -101,22 +88,17 @@ async def test_refresh_old_token_rejected_after_rotation(
     async_client: AsyncClient,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The original refresh token is rejected after a successful rotation (SR-07).
-
-    After one successful call to /auth/refresh, the original refresh token must
-    return 401 on any subsequent attempt.  This enforces single-use semantics.
-    """
+    """Original refresh token is rejected after rotation
+    — single-use semantics (SR-07)."""
     email = "refresh_old_rejected@example.com"
     _, _access, orig_refresh = await register_verify_login(async_client, capsys, email)
 
-    # First rotation succeeds.
     first_resp = await async_client.post(
         _REFRESH_URL,
         json={"refresh_token": orig_refresh},
     )
     assert first_resp.status_code == 200
 
-    # Presenting the original token again must be rejected.
     reuse_resp = await async_client.post(
         _REFRESH_URL,
         json={"refresh_token": orig_refresh},
@@ -130,29 +112,17 @@ async def test_refresh_reuse_detection_revokes_session(
     fake_redis: object,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Reuse detection (SR-08): replaying an old refresh token destroys the session.
+    """SR-08: replaying a revoked refresh token destroys the current session.
 
-    Scenario:
-    1. Login to obtain access_token_1 and refresh_token_1.
-    2. Rotate to obtain access_token_2 and refresh_token_2.
-       (refresh_token_1 is now revoked; session has been rotated.)
-    3. Present refresh_token_1 again → 401 (reuse detected).
-       The service must delete the Redis session for the session_id associated
-       with refresh_token_1 — which is the *new* session from step 2.
-    4. access_token_2, which carries the new session_id, must now be rejected
-       by get_current_user because its session key was deleted in step 3.
-
-    This proves that SR-08 breaks the attacker's ability to maintain access
-    after the victim rotates: even if the attacker captured refresh_token_1
-    before the rotation, triggering reuse detection invalidates the victim's
-    current session.
+    Scenario: login → rotate → replay old token → 401 → new access token also rejected.
+    Proves that reuse detection invalidates the victim's current session, not just
+    the replayed one.
     """
     email = "refresh_reuse_session@example.com"
     _, access_token_1, refresh_token_1 = await register_verify_login(
         async_client, capsys, email
     )
 
-    # Step 2: successful rotation.
     rotate_resp = await async_client.post(
         _REFRESH_URL,
         json={"refresh_token": refresh_token_1},
@@ -160,7 +130,6 @@ async def test_refresh_reuse_detection_revokes_session(
     assert rotate_resp.status_code == 200
     access_token_2 = rotate_resp.json()["access_token"]
 
-    # Decode to get the new session_id so we can verify it disappears.
     settings = Settings()  # type: ignore[call-arg]
     decoded_2 = pyjwt.decode(
         access_token_2,
@@ -170,22 +139,18 @@ async def test_refresh_reuse_detection_revokes_session(
     )
     new_session_id = decoded_2["session_id"]
 
-    # Confirm the new session exists in Redis before triggering reuse.
     session_before = await fake_redis.get(f"session:{new_session_id}")  # type: ignore[union-attr]
     assert session_before is not None, "New session must exist before reuse detection"
 
-    # Step 3: replay the original refresh token → reuse detection.
     reuse_resp = await async_client.post(
         _REFRESH_URL,
         json={"refresh_token": refresh_token_1},
     )
     assert reuse_resp.status_code == 401
 
-    # Step 4: the new session's Redis key must now be gone (SR-08).
     session_after = await fake_redis.get(f"session:{new_session_id}")  # type: ignore[union-attr]
     assert session_after is None, "Redis session must be deleted after reuse detection"
 
-    # access_token_2 must now be rejected because its session is gone.
     protected_resp = await async_client.get(
         _PROTECTED_REFRESH_URL,
         headers={"Authorization": f"Bearer {access_token_2}"},
@@ -197,11 +162,7 @@ async def test_refresh_reuse_detection_revokes_session(
 async def test_refresh_with_invalid_token(
     async_client: AsyncClient,
 ) -> None:
-    """POST /auth/refresh with a random string returns 401 (SR-07).
-
-    A token that was never issued cannot match any stored hash; the endpoint
-    must return 401 without leaking any information about the token store.
-    """
+    """POST /auth/refresh with a random string returns 401 (SR-07)."""
     resp = await async_client.post(
         _REFRESH_URL,
         json={"refresh_token": "this-token-was-never-issued"},
@@ -215,16 +176,10 @@ async def test_refresh_with_expired_token(
     db_session: AsyncSession,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """POST /auth/refresh with an expired token returns 401 (SR-07).
-
-    Manually backdates ``expires_at`` on the RefreshToken row so the service
-    treats it as expired.  The endpoint must return 401 without rotating or
-    issuing new tokens.
-    """
+    """POST /auth/refresh with an expired token returns 401 (SR-07)."""
     email = "refresh_expired@example.com"
     _, _access, refresh_token = await register_verify_login(async_client, capsys, email)
 
-    # Look up the token row and set expires_at to a past timestamp.
     token_hash = hash_token(refresh_token)
     result = await db_session.execute(
         select(RefreshToken).where(RefreshToken.token_hash == token_hash)
@@ -232,7 +187,6 @@ async def test_refresh_with_expired_token(
     token_row = result.scalar_one_or_none()
     assert token_row is not None
 
-    # Backdate expiry to a fixed point in the past so the token is clearly expired.
     token_row.expires_at = datetime(2000, 1, 1, tzinfo=timezone.utc)
     await db_session.commit()
 
@@ -249,11 +203,7 @@ async def test_refresh_audit_log_written(
     db_session: AsyncSession,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """A TOKEN_REFRESHED audit log entry is written on successful rotation (SR-16).
-
-    Queries the ``audit_logs`` table scoped by action and user_id (ADR-18) to
-    confirm that the event was recorded for the specific user.
-    """
+    """A TOKEN_REFRESHED audit log entry is written on successful rotation (SR-16)."""
     email = "refresh_audit@example.com"
     user_id, _access, refresh_token = await register_verify_login(
         async_client, capsys, email
@@ -265,7 +215,6 @@ async def test_refresh_audit_log_written(
     )
     assert refresh_resp.status_code == 200
 
-    # ADR-18: scope by both action and user_id.
     result = await db_session.execute(
         select(AuditLog).where(
             AuditLog.action == "TOKEN_REFRESHED",
@@ -283,10 +232,6 @@ async def test_refresh_audit_log_written(
 async def test_refresh_missing_token_returns_422(
     async_client: AsyncClient,
 ) -> None:
-    """POST /auth/refresh without refresh_token in the body returns 422.
-
-    The ``RefreshRequest`` schema requires a ``refresh_token`` field. Omitting
-    it must trigger Pydantic validation failure (422).
-    """
+    """POST /auth/refresh without refresh_token in body returns 422."""
     resp = await async_client.post(_REFRESH_URL, json={})
     assert resp.status_code == 422

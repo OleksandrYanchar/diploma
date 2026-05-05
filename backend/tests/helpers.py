@@ -6,8 +6,6 @@ asserts on the intermediate steps so that a failure in the setup phase is
 immediately visible in the test output.
 """
 
-from __future__ import annotations
-
 import pyotp
 import pytest
 from httpx import AsyncClient

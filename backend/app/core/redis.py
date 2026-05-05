@@ -4,18 +4,11 @@ Provides a single ``redis.asyncio.Redis`` connection pool shared across all
 requests.  The client is initialised during application startup and closed
 during shutdown via the FastAPI lifespan.
 
-Redis is used for:
-- Session records keyed by session_id (SR-10)
-- Access token blacklist after logout (SR-09)
-- Step-up token one-time-use flags (SR-14)
-- Rate limit sliding-window counters (SR-15)
 
 Security property enforced: the Redis connection requires authentication via
 the password embedded in ``REDIS_URL``.  The password is never hardcoded; it
 comes from the environment variable (SR-19).
 """
-
-from __future__ import annotations
 
 import redis.asyncio as aioredis
 from redis.asyncio import Redis
@@ -62,16 +55,6 @@ def get_redis() -> Redis:  # type: ignore[type-arg]
     This is a synchronous getter (not an async generator) because the Redis
     client itself is connection-pool backed and thread/coroutine safe.  It
     is intended to be used as a FastAPI dependency via ``Depends(get_redis)``.
-
-    Usage in a route::
-
-        from fastapi import Depends
-        from redis.asyncio import Redis
-        from app.core.redis import get_redis
-
-        @router.get("/example")
-        async def example(redis: Redis = Depends(get_redis)):
-            await redis.set("key", "value", ex=60)
 
     Raises:
         RuntimeError: If ``init_redis`` has not been called before the first

@@ -12,8 +12,6 @@ Security properties:
   validation is applied in the service layer (SR-01).
 """
 
-from __future__ import annotations
-
 import uuid
 from datetime import datetime
 

@@ -1,4 +1,4 @@
-"""Admin router — Phase 4.
+"""Admin router
 
 This module contains a single placeholder endpoint used as an RBAC test
 anchor. Real admin functionality (audit log queries, user management,
@@ -7,8 +7,6 @@ security event views) is deferred to Phase 7.
 Endpoints:
   GET /admin/ping — health check for admin-role access (SR-11).
 """
-
-from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 

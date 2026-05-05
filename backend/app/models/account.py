@@ -11,8 +11,6 @@ Security properties:
   errors in financial calculations.
 """
 
-from __future__ import annotations
-
 import enum
 import secrets
 import uuid
@@ -57,7 +55,6 @@ class Account(Base):
     )
 
     # Human-readable unique account identifier used in transfer destinations.
-    # Generated at creation; never mutable after that.
     account_number: Mapped[str] = mapped_column(
         String(16),
         nullable=False,
@@ -65,9 +62,6 @@ class Account(Base):
         default=_generate_account_number,
     )
 
-    # FK to the owning user.  Cascade delete is handled at the User level.
-    # unique=True enforces the one-account-per-user invariant at the DB level so
-    # that concurrent inserts cannot produce duplicate rows (migration 0004).
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="CASCADE"),
@@ -75,7 +69,6 @@ class Account(Base):
         unique=True,
     )
 
-    # Lifecycle status — ACTIVE is the only state that permits transfers (T-02).
     status: Mapped[AccountStatus] = mapped_column(
         Enum(AccountStatus, name="accountstatus"),
         nullable=False,
@@ -84,7 +77,6 @@ class Account(Base):
     )
 
     # Balance stored with 18 integer digits and 2 decimal places.
-    # Arithmetic must be performed with Decimal, never float.
     balance: Mapped[Decimal] = mapped_column(
         Numeric(precision=18, scale=2),
         nullable=False,

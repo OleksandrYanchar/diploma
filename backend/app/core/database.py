@@ -8,8 +8,6 @@ parameterized query mechanism — raw SQL string interpolation is never used,
 preventing SQL injection (SR-20).
 """
 
-from __future__ import annotations
-
 from collections.abc import AsyncGenerator
 
 from sqlalchemy.ext.asyncio import (
@@ -22,22 +20,8 @@ from sqlalchemy.orm import DeclarativeBase
 
 
 class Base(DeclarativeBase):
-    """Declarative base class shared by all ORM models.
+    """Declarative base class shared by all ORM models."""
 
-    All models in ``app/models/`` must inherit from this class so that
-    Alembic's autogenerate can discover their table definitions through the
-    shared ``metadata`` object.
-    """
-
-
-# Module-level engine and session factory.  These are initialised once during
-# application startup (via the ``init_db`` function called from the FastAPI
-# lifespan) and reused for the lifetime of the process.
-#
-# They are intentionally module-level rather than global mutable state in the
-# sense that they are set exactly once and never mutated afterwards.  Tests
-# replace these via ``override_get_db`` dependency overrides, not by mutating
-# these variables directly.
 
 _engine: AsyncEngine | None = None
 _async_session_factory: async_sessionmaker[AsyncSession] | None = None
@@ -46,23 +30,16 @@ _async_session_factory: async_sessionmaker[AsyncSession] | None = None
 def init_db(database_url: str) -> None:
     """Initialise the database engine and session factory.
 
-    Must be called once during application startup (inside the FastAPI
-    lifespan context manager) before any request is handled.
-
-    Args:
-        database_url: The async PostgreSQL DSN string, e.g.
-            ``postgresql+asyncpg://user:pass@host:5432/dbname``.
+    Must be called once during application startup before any request is handled.
     """
     global _engine, _async_session_factory  # noqa: PLW0603
 
     _engine = create_async_engine(
         database_url,
-        # Echo SQL statements only in development; never in production.
         echo=False,
-        # Pool settings appropriate for a single-process Uvicorn deployment.
         pool_size=10,
         max_overflow=20,
-        pool_pre_ping=True,  # Detect and replace stale connections.
+        pool_pre_ping=True,
     )
 
     _async_session_factory = async_sessionmaker(
@@ -90,19 +67,7 @@ async def close_db() -> None:
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """FastAPI dependency that yields a database session per request.
 
-    Each request receives its own ``AsyncSession``.  The session is committed
-    if the handler completes without error, and rolled back if an exception
-    is raised, ensuring that partial writes never reach the database.
-
-    Usage in a route::
-
-        from fastapi import Depends
-        from sqlalchemy.ext.asyncio import AsyncSession
-        from app.core.database import get_db
-
-        @router.get("/example")
-        async def example(db: AsyncSession = Depends(get_db)):
-            ...
+    Each request receives its own ``AsyncSession``.
 
     Raises:
         RuntimeError: If ``init_db`` has not been called before the first

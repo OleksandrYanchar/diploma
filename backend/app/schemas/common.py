@@ -4,8 +4,6 @@ Contains generic response envelopes and reusable field types that are used by
 more than one domain schema module.
 """
 
-from __future__ import annotations
-
 from pydantic import BaseModel, Field
 
 
@@ -31,13 +29,7 @@ class MessageResponse(BaseModel):
 
 
 class ErrorDetail(BaseModel):
-    """Structured error detail included in error responses.
-
-    FastAPI uses this as the ``detail`` value in HTTP 4xx/5xx responses.
-    The ``code`` field provides a machine-readable identifier for the
-    specific error condition that clients can act on without parsing the
-    human-readable ``message``.
-    """
+    """Structured error detail included in error responses."""
 
     code: str = Field(examples=["TOKEN_EXPIRED"])
     message: str = Field(examples=["The access token has expired."])

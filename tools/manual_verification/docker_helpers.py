@@ -8,8 +8,6 @@ container, not as a CLI argument, to avoid it appearing in ps output on the
 host.
 """
 
-from __future__ import annotations
-
 import subprocess
 from pathlib import Path
 

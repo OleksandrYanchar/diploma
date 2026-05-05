@@ -1,14 +1,4 @@
-"""Integration tests for POST /auth/step-up.
-
-Covers:
-- Authentication and verification gates (SR-03, SR-13)
-- MFA prerequisite enforcement (SR-13)
-- Invalid TOTP code rejection with STEP_UP_FAILED audit log (SR-16)
-- Successful issuance: step_up_token in response, Redis key present with TTL (SR-14)
-- STEP_UP_VERIFIED audit log written on success (SR-16)
-"""
-
-from __future__ import annotations
+"""Integration tests for POST /auth/step-up."""
 
 import uuid
 

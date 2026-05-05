@@ -1,28 +1,5 @@
 """Authentication router — registration, verification, login, refresh, logout, and MFA.
 
-Exposes:
-- POST /auth/register                 -- create a new user account (SR-01, SR-02, SR-03)
-- GET  /auth/verify-email             -- consume the email verification token (SR-03)
-- POST /auth/login                    -- authenticate and receive JWT + refresh token
-                                         (SR-02, SR-05, SR-06, SR-07, SR-10, SR-16)
-- POST /auth/refresh                  -- rotate refresh token and issue new access token
-                                         (SR-07, SR-08, SR-10, SR-16)
-- POST /auth/logout                   -- terminate session, revoke tokens
-                                         (SR-09, SR-10, SR-16)
-- POST /auth/mfa/setup                -- initiate TOTP enrollment, return secret + QR
-                                         code (SR-04, SR-16)
-- POST /auth/mfa/enable               -- confirm TOTP code and activate the MFA gate
-                                         (SR-04, SR-16)
-- POST /auth/mfa/disable              -- deactivate the MFA gate after verifying
-                                         password + TOTP (SR-04, SR-16)
-- POST /auth/password/change          -- change the authenticated user's password
-                                         (SR-01, SR-02, SR-16; ADR-21)
-- POST /auth/step-up                  -- verify TOTP and issue a short-lived step-up JWT
-                                         for sensitive operations (SR-13, SR-14, SR-16)
-- POST /auth/password/reset/request   -- issue a one-time password reset token (SR-18)
-- POST /auth/password/reset/confirm   -- verify reset token and set new password
-                                         (SR-01, SR-02, SR-07, SR-10, SR-18)
-
 Route handlers are intentionally thin: they extract HTTP inputs, delegate all
 business logic to ``auth.service``, and format the response.  No security
 decisions are made here.
@@ -33,8 +10,6 @@ and /password/reset/confirm are unauthenticated by design.  /logout, /mfa/setup,
 token via ``get_current_user``.  /step-up additionally requires ``require_verified``.
 Rate limiting is enforced at the Nginx layer (SR-15).
 """
-
-from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -204,12 +179,6 @@ async def login(
     client can prompt the user for their TOTP code and re-submit.  The TOTP
     verification path is implemented in Phase 3.
 
-    ``response_model=None`` is set intentionally: the endpoint returns two
-    distinct Pydantic models (``TokenResponse`` or ``MFARequiredResponse``)
-    depending on MFA state.  FastAPI cannot automatically select the correct
-    serializer when ``response_model`` is a Union, so we return the Pydantic
-    objects directly and let FastAPI serialize whichever model is returned.
-
     Args:
         request:  The incoming FastAPI Request, used to extract IP and
                   User-Agent for audit logging (SR-16).
@@ -244,8 +213,6 @@ async def login(
     )
 
     if access_token is None:
-        # MFA gate: password was valid but a TOTP code is required.
-        # No tokens were issued by the service; signal the client to re-submit.
         return MFARequiredResponse()
 
     return TokenResponse(
@@ -367,10 +334,6 @@ async def logout(
         HTTPException 401: Token invalid, expired, revoked, or session gone.
         HTTPException 403: Authorization header absent (HTTPBearer behaviour).
     """
-    # Decode the access token a second time to obtain the raw payload dict.
-    # get_current_user already validated the token; this call is guaranteed to
-    # succeed because the same token just passed the dependency.  We need the
-    # payload directly (jti, exp, session_id) for the revocation operations.
     try:
         payload = decode_access_token(credentials.credentials, settings)
     except InvalidTokenError as exc:

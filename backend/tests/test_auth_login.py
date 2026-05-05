@@ -12,8 +12,6 @@ fresh in-memory SQLite database and FakeRedis instance per test.  No test
 depends on state produced by another test.
 """
 
-from __future__ import annotations
-
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -27,10 +25,6 @@ from app.core.config import Settings
 from app.models.audit_log import AuditLog
 from app.models.user import User
 
-# ---------------------------------------------------------------------------
-# URL constants
-# ---------------------------------------------------------------------------
-
 _REGISTER_URL = "/api/v1/auth/register"
 _VERIFY_URL = "/api/v1/auth/verify-email"
 _LOGIN_URL = "/api/v1/auth/login"
@@ -38,28 +32,12 @@ _LOGIN_URL = "/api/v1/auth/login"
 _STRONG_PASSWORD = "StrongPass1!"
 
 
-# ---------------------------------------------------------------------------
-# Shared helper
-# ---------------------------------------------------------------------------
-
-
 async def _register_and_verify(
     async_client: AsyncClient,
     capsys: pytest.CaptureFixture[str],
     email: str,
 ) -> None:
-    """Register a user and complete email verification.
-
-    Registers the given email with the shared strong password, then captures
-    the raw verification token from stdout (DEMO MODE print) and calls the
-    verify-email endpoint.  After this helper returns, the user is active and
-    verified, ready for login tests.
-
-    Args:
-        async_client: The test HTTP client fixture.
-        capsys:       pytest's stdout/stderr capture fixture.
-        email:        The email address to register.
-    """
+    """Register a user and complete email verification."""
     resp = await async_client.post(
         _REGISTER_URL,
         json={"email": email, "password": _STRONG_PASSWORD},
@@ -71,11 +49,6 @@ async def _register_and_verify(
 
     verify_resp = await async_client.get(_VERIFY_URL, params={"token": raw_token})
     assert verify_resp.status_code == 200
-
-
-# ---------------------------------------------------------------------------
-# Login tests
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -162,7 +135,6 @@ async def test_login_unverified_user_can_still_login(
     )
     assert register_resp.status_code == 201
 
-    # Deliberately do NOT verify the email — login should still succeed.
     response = await async_client.post(
         _LOGIN_URL,
         json={"email": email, "password": _STRONG_PASSWORD},
@@ -188,7 +160,6 @@ async def test_login_account_lockout_after_max_failures(
     email = "login_lockout@example.com"
     await _register_and_verify(async_client, capsys, email)
 
-    # Exhaust the allowed failure count (default: 5).
     for attempt in range(5):
         resp = await async_client.post(
             _LOGIN_URL,
@@ -198,7 +169,6 @@ async def test_login_account_lockout_after_max_failures(
             resp.status_code == 401
         ), f"Expected 401 on attempt {attempt + 1}, got {resp.status_code}"
 
-    # The account should now be locked.  Even correct credentials must be rejected.
     locked_resp = await async_client.post(
         _LOGIN_URL,
         json={"email": email, "password": _STRONG_PASSWORD},
@@ -222,7 +192,6 @@ async def test_login_audit_log_written_on_success(
     """
     email = "login_audit_ok@example.com"
 
-    # Register directly so we capture the user id from the response body.
     reg_resp = await async_client.post(
         _REGISTER_URL,
         json={"email": email, "password": _STRONG_PASSWORD},
@@ -230,7 +199,6 @@ async def test_login_audit_log_written_on_success(
     assert reg_resp.status_code == 201
     user_id = reg_resp.json()["id"]
 
-    # Complete email verification.
     captured = capsys.readouterr()
     raw_token = captured.out.strip().rsplit(": ", maxsplit=1)[-1]
     verify_resp = await async_client.get(_VERIFY_URL, params={"token": raw_token})
@@ -268,7 +236,6 @@ async def test_login_audit_log_written_on_failure(
     """
     email = "login_audit_fail@example.com"
 
-    # Register directly to capture user id.
     reg_resp = await async_client.post(
         _REGISTER_URL,
         json={"email": email, "password": _STRONG_PASSWORD},
@@ -276,7 +243,6 @@ async def test_login_audit_log_written_on_failure(
     assert reg_resp.status_code == 201
     user_id = reg_resp.json()["id"]
 
-    # Complete email verification.
     captured = capsys.readouterr()
     raw_token = captured.out.strip().rsplit(": ", maxsplit=1)[-1]
     verify_resp = await async_client.get(_VERIFY_URL, params={"token": raw_token})
@@ -300,26 +266,13 @@ async def test_login_audit_log_written_on_failure(
     assert log_entry.details == {"reason": "invalid_password"}
 
 
-# ---------------------------------------------------------------------------
-# P2 fix: LOGIN_FAILED audit log for unknown-email path
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_login_failed_audit_log_unknown_email(
     async_client: AsyncClient,
     db_session: AsyncSession,
 ) -> None:
-    """A LOGIN_FAILED audit log entry is written when the email is not registered.
-
-    Verifies that the unknown-email path in login() writes an AuditLog entry
-    with action="LOGIN_FAILED", user_id=None, and details containing
-    reason="user_not_found" AFTER the dummy hash runs (SR-16).
-
-    The query is scoped by action + user_id=None to satisfy ADR-18.  A single
-    entry is expected; if prior tests happen to produce a user_id=None entry
-    with a different reason, the details assertion differentiates them.
-    """
+    """A LOGIN_FAILED audit log with user_id=None is written
+    for unregistered email (SR-16)."""
     response = await async_client.post(
         _LOGIN_URL,
         json={"email": "never_registered@example.com", "password": _STRONG_PASSWORD},
@@ -332,8 +285,6 @@ async def test_login_failed_audit_log_unknown_email(
             AuditLog.user_id.is_(None),
         )
     )
-    # Multiple user_id=None LOGIN_FAILED rows may exist across tests; find the
-    # one written by this test by matching on the reason detail.
     all_entries = result.scalars().all()
     log_entry = next(
         (
@@ -349,11 +300,6 @@ async def test_login_failed_audit_log_unknown_email(
     ), "Expected a LOGIN_FAILED audit log entry for unknown email"
     assert log_entry.user_id is None
     assert log_entry.details.get("reason") == "user_not_found"
-
-
-# ---------------------------------------------------------------------------
-# P1 fix: MFA gate returns MFARequiredResponse (not HTTPException 200)
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -378,13 +324,11 @@ async def test_login_mfa_gate_returns_mfa_required(
     assert reg_resp.status_code == 201
     user_id = reg_resp.json()["id"]
 
-    # Complete email verification.
     captured = capsys.readouterr()
     raw_token = captured.out.strip().rsplit(": ", maxsplit=1)[-1]
     verify_resp = await async_client.get(_VERIFY_URL, params={"token": raw_token})
     assert verify_resp.status_code == 200
 
-    # Directly enable MFA on the user record to simulate a Phase 3-enrolled user.
     user_result = await db_session.execute(
         select(User).where(User.id == uuid.UUID(user_id))
     )
@@ -431,13 +375,11 @@ async def test_login_mfa_gate_writes_audit_log(
     assert reg_resp.status_code == 201
     user_id = reg_resp.json()["id"]
 
-    # Complete email verification.
     captured = capsys.readouterr()
     raw_token = captured.out.strip().rsplit(": ", maxsplit=1)[-1]
     verify_resp = await async_client.get(_VERIFY_URL, params={"token": raw_token})
     assert verify_resp.status_code == 200
 
-    # Enable MFA directly in the DB.
     user_result = await db_session.execute(
         select(User).where(User.id == uuid.UUID(user_id))
     )
@@ -461,11 +403,6 @@ async def test_login_mfa_gate_writes_audit_log(
 
     assert log_entry is not None, "Expected a LOGIN_MFA_REQUIRED audit log entry"
     assert log_entry.user_id == uuid.UUID(user_id)
-
-
-# ---------------------------------------------------------------------------
-# Deactivated / locked / session / validation edge cases
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -586,10 +523,6 @@ async def test_login_missing_fields_returns_422(
     resp = await async_client.post(_LOGIN_URL, json=body)
     assert resp.status_code == 422
 
-
-# ---------------------------------------------------------------------------
-# Concurrent sessions
-# ---------------------------------------------------------------------------
 
 _USERS_ME_URL = "/api/v1/users/me"
 

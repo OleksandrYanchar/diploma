@@ -1,6 +1,6 @@
 """End-to-end happy-path test for the complete authentication lifecycle.
 
-Walks through every Phase 1–4 auth flow in a single test:
+Walks through every Phase 1-4 auth flow in a single test:
 register → verify email → login → GET /users/me → refresh → MFA setup →
 MFA enable → logout → MFA login → password change → MFA disable →
 plain login → logout → blacklisted-token rejection.
@@ -15,8 +15,6 @@ Run with ``-s`` to see the step-by-step request trace::
 
     poetry run pytest tests/test_e2e_auth_lifecycle.py -v -s
 """
-
-from __future__ import annotations
 
 import pyotp
 import pytest
@@ -57,7 +55,7 @@ async def test_full_auth_lifecycle(
 
     print("\n--- E2E Auth Lifecycle ---")
 
-    # ---- 1. Register ----
+    # 1. Register
     reg = await async_client.post(_REGISTER, json={"email": email, "password": _PWD})
     assert reg.status_code == 201
     assert reg.json()["email"] == email
@@ -66,12 +64,12 @@ async def test_full_auth_lifecycle(
     raw_token = capsys.readouterr().out.strip().rsplit(": ", maxsplit=1)[-1]
     _log(1, "POST", _REGISTER, reg)
 
-    # ---- 2. Verify email ----
+    # 2. Verify email
     verify = await async_client.get(_VERIFY, params={"token": raw_token})
     _log(2, "GET", _VERIFY, verify)
     assert verify.status_code == 200
 
-    # ---- 3. Login (no MFA) ----
+    # 3. Login (no MFA)
     login = await async_client.post(_LOGIN, json={"email": email, "password": _PWD})
     _log(3, "POST", _LOGIN, login)
     assert login.status_code == 200
@@ -80,27 +78,27 @@ async def test_full_auth_lifecycle(
     assert d["token_type"] == "bearer"
     assert d["expires_in"] > 0
 
-    # ---- 4. GET /users/me ----
+    # 4. GET /users/me
     me = await async_client.get(_ME, headers=auth(access))
     _log(4, "GET", _ME, me)
     assert me.status_code == 200
     assert me.json()["email"] == email
     assert me.json()["is_verified"] is True
 
-    # ---- 5. Refresh tokens ----
+    # 5. Refresh tokens
     ref = await async_client.post(_REFRESH, json={"refresh_token": refresh})
     _log(5, "POST", _REFRESH, ref)
     assert ref.status_code == 200
     access, refresh = ref.json()["access_token"], ref.json()["refresh_token"]
 
-    # ---- 6. MFA setup ----
+    # 6. MFA setup
     setup = await async_client.post(_MFA_SETUP, headers=auth(access))
     _log(6, "POST", _MFA_SETUP, setup)
     assert setup.status_code == 200
     secret = setup.json()["secret"]
     assert len(setup.json()["qr_code_base64"]) > 0
 
-    # ---- 7. MFA enable ----
+    # 7. MFA enable
     enable = await async_client.post(
         _MFA_ENABLE,
         json={"totp_code": pyotp.TOTP(secret).now()},
@@ -109,14 +107,14 @@ async def test_full_auth_lifecycle(
     _log(7, "POST", _MFA_ENABLE, enable)
     assert enable.status_code == 200
 
-    # ---- 8. Logout (old session) ----
+    # 8. Logout (old session)
     out1 = await async_client.post(
         _LOGOUT, json={"refresh_token": refresh}, headers=auth(access)
     )
     _log(8, "POST", _LOGOUT, out1)
     assert out1.status_code == 200
 
-    # ---- 9. Login with MFA (password + TOTP) ----
+    # 9. Login with MFA (password + TOTP)
     mfa_login = await async_client.post(
         _LOGIN,
         json={
@@ -132,7 +130,7 @@ async def test_full_auth_lifecycle(
         mfa_login.json()["refresh_token"],
     )
 
-    # ---- 10. Password change ----
+    # 10. Password change
     pw = await async_client.post(
         _PW_CHANGE,
         json={"current_password": _PWD, "new_password": _NEW_PWD},
@@ -141,7 +139,7 @@ async def test_full_auth_lifecycle(
     _log(10, "POST", _PW_CHANGE, pw)
     assert pw.status_code == 200
 
-    # ---- 11. MFA disable (uses new password) ----
+    # 11. MFA disable (uses new password)
     disable = await async_client.post(
         _MFA_DISABLE,
         json={"password": _NEW_PWD, "totp_code": pyotp.TOTP(secret).now()},
@@ -150,14 +148,14 @@ async def test_full_auth_lifecycle(
     _log(11, "POST", _MFA_DISABLE, disable)
     assert disable.status_code == 200
 
-    # ---- 12. Login without TOTP (MFA off, new password) ----
+    # 12. Login without TOTP (MFA off, new password)
     plain = await async_client.post(_LOGIN, json={"email": email, "password": _NEW_PWD})
     _log(12, "POST", _LOGIN + " (no MFA)", plain)
     assert plain.status_code == 200
     assert "mfa_required" not in plain.json()
     access, refresh = plain.json()["access_token"], plain.json()["refresh_token"]
 
-    # ---- 13. Final logout ----
+    # 13. Final logout
     out2 = await async_client.post(
         _LOGOUT, json={"refresh_token": refresh}, headers=auth(access)
     )

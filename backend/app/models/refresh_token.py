@@ -15,8 +15,6 @@ Security properties:
 - ``expires_at`` caps the token lifetime independently of the revoked flag.
 """
 
-from __future__ import annotations
-
 import uuid
 from datetime import datetime
 
@@ -46,8 +44,6 @@ class RefreshToken(Base):
         index=True,
     )
 
-    # SHA-256 hex digest of the raw opaque token.
-    # Unique + indexed for fast lookup by incoming token value.
     token_hash: Mapped[str] = mapped_column(
         String(64),  # SHA-256 produces a 64-character hex string
         unique=True,
@@ -55,21 +51,17 @@ class RefreshToken(Base):
         nullable=False,
     )
 
-    # UUID that ties this token to a Redis session entry.
-    # All tokens sharing a session_id are invalidated together on logout (SR-10).
     session_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         nullable=False,
         index=True,
     )
 
-    # Absolute expiry timestamp.
     expires_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
     )
 
-    # Set to True when the token is consumed (SR-07) or revoked (SR-08/SR-09).
     revoked: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
@@ -82,7 +74,6 @@ class RefreshToken(Base):
         server_default=func.now(),
     )
 
-    # Relationship back to User for cascade operations.
     user: Mapped["User"] = relationship(  # noqa: F821
         "User",
         back_populates="refresh_tokens",

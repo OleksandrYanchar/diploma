@@ -9,8 +9,6 @@ Security properties:
   requesting user already knows (their own account IDs).
 """
 
-from __future__ import annotations
-
 import uuid
 from datetime import datetime
 from decimal import Decimal
