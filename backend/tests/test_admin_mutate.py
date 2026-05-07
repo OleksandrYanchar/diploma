@@ -564,3 +564,55 @@ async def test_role_change_self_writes_audit_log(
     assert log is not None
     assert log.details["result"] == "failure"
     assert log.details["reason"] == "self_role_change_blocked"
+
+
+@pytest.mark.asyncio
+async def test_activate_auditor_role_returns_403(
+    async_client: AsyncClient,
+    fake_redis: fakeredis.FakeRedis,
+    db_session: AsyncSession,
+) -> None:
+    """AUDITOR role cannot call activate (SR-11)."""
+    _, token = await _make_inline_user(db_session, fake_redis, UserRole.AUDITOR)
+    target, _ = await _make_inline_user(db_session, fake_redis, UserRole.USER)
+
+    response = await async_client.patch(
+        _ACTIVATE_URL.format(target.id),
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_deactivate_auditor_role_returns_403(
+    async_client: AsyncClient,
+    fake_redis: fakeredis.FakeRedis,
+    db_session: AsyncSession,
+) -> None:
+    """AUDITOR role cannot call deactivate (SR-11)."""
+    _, token = await _make_inline_user(db_session, fake_redis, UserRole.AUDITOR)
+    target, _ = await _make_inline_user(db_session, fake_redis, UserRole.USER)
+
+    response = await async_client.patch(
+        _DEACTIVATE_URL.format(target.id),
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_role_change_auditor_role_returns_403(
+    async_client: AsyncClient,
+    fake_redis: fakeredis.FakeRedis,
+    db_session: AsyncSession,
+) -> None:
+    """AUDITOR role cannot call role change (SR-11)."""
+    _, token = await _make_inline_user(db_session, fake_redis, UserRole.AUDITOR)
+    target, _ = await _make_inline_user(db_session, fake_redis, UserRole.USER)
+
+    response = await async_client.patch(
+        _ROLE_URL.format(target.id),
+        json={"role": "user"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 403
