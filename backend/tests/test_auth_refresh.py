@@ -235,3 +235,88 @@ async def test_refresh_missing_token_returns_422(
     """POST /auth/refresh without refresh_token in body returns 422."""
     resp = await async_client.post(_REFRESH_URL, json={})
     assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_refresh_reuse_detection_revokes_sibling_db_token(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Reuse detection must mark sibling DB refresh tokens as revoked (H-5/SR-08).
+
+    An attacker holding a non-replayed sibling token must be rejected after
+    reuse detection fires, not just after their Redis session is deleted.
+    """
+    email = f"sibling_revoke_{uuid.uuid4().hex[:8]}@example.com"
+    user_id_str, _access, refresh_token_1 = await register_verify_login(
+        async_client, capsys, email
+    )
+
+    # Rotate once — token_1 is revoked, token_2 is the live sibling.
+    rotate_resp = await async_client.post(
+        _REFRESH_URL, json={"refresh_token": refresh_token_1}
+    )
+    assert rotate_resp.status_code == 200
+    refresh_token_2 = rotate_resp.json()["refresh_token"]
+
+    # Replay the already-rotated token_1 — triggers reuse detection.
+    reuse_resp = await async_client.post(
+        _REFRESH_URL, json={"refresh_token": refresh_token_1}
+    )
+    assert reuse_resp.status_code == 401
+
+    # The sibling token_2 must now be rejected (revoked in DB by bulk UPDATE).
+    sibling_resp = await async_client.post(
+        _REFRESH_URL, json={"refresh_token": refresh_token_2}
+    )
+    assert sibling_resp.status_code == 401, (
+        "Sibling refresh token must be rejected after reuse detection"
+    )
+
+    # Verify the DB row for token_2 is marked revoked.
+    token_2_hash = hash_token(refresh_token_2)
+    result = await db_session.execute(
+        select(RefreshToken).where(RefreshToken.token_hash == token_2_hash)
+    )
+    sibling_row = result.scalar_one_or_none()
+    assert sibling_row is not None
+    assert sibling_row.revoked is True, "Sibling DB token must be marked revoked"
+
+
+@pytest.mark.asyncio
+async def test_refresh_reuse_detection_writes_audit_log(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """TOKEN_REUSE_DETECTED AuditLog entry is written on refresh token replay (TD-12/SR-16)."""
+    email = f"reuse_audit_{uuid.uuid4().hex[:8]}@example.com"
+    user_id_str, _access, refresh_token_1 = await register_verify_login(
+        async_client, capsys, email
+    )
+
+    # Rotate so token_1 becomes revoked.
+    rotate_resp = await async_client.post(
+        _REFRESH_URL, json={"refresh_token": refresh_token_1}
+    )
+    assert rotate_resp.status_code == 200
+
+    # Replay the revoked token.
+    reuse_resp = await async_client.post(
+        _REFRESH_URL, json={"refresh_token": refresh_token_1}
+    )
+    assert reuse_resp.status_code == 401
+
+    # AuditLog must contain TOKEN_REUSE_DETECTED for this user.
+    result = await db_session.execute(
+        select(AuditLog).where(
+            AuditLog.action == "TOKEN_REUSE_DETECTED",
+            AuditLog.user_id == uuid.UUID(user_id_str),
+        )
+    )
+    log_entry = result.scalar_one_or_none()
+    assert log_entry is not None, "Expected TOKEN_REUSE_DETECTED audit log entry"
+    assert log_entry.details is not None
+    assert "session_id" in log_entry.details
+    assert "tokens_revoked" in log_entry.details

@@ -42,7 +42,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException
 from redis.asyncio import Redis
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
@@ -448,6 +448,17 @@ async def refresh_tokens(
         raise HTTPException(status_code=401, detail="Invalid refresh token")
 
     if token_row.revoked:
+        # SR-08: Reuse detection — bulk-revoke ALL tokens in DB first, then
+        # destroy Redis sessions. DB revocation must be committed before Redis
+        # keys are deleted so concurrent sibling-token requests are rejected at
+        # the DB layer even if Redis is briefly stale.
+        await db.execute(
+            update(RefreshToken)
+            .where(RefreshToken.user_id == token_row.user_id)
+            .values(revoked=True)
+        )
+
+        # Collect all session keys for deletion (after the UPDATE so we capture all rows).
         user_rt_result = await db.execute(
             select(RefreshToken).where(RefreshToken.user_id == token_row.user_id)
         )
@@ -456,6 +467,19 @@ async def refresh_tokens(
         if session_keys:
             await redis.delete(*session_keys)
 
+        # AuditLog first — authoritative forensic timeline (SR-16).
+        db.add(
+            AuditLog(
+                user_id=token_row.user_id,
+                action="TOKEN_REUSE_DETECTED",
+                ip_address=ip_address,
+                user_agent=user_agent,
+                details={
+                    "session_id": str(token_row.session_id),
+                    "tokens_revoked": len(all_user_tokens),
+                },
+            )
+        )
         db.add(
             SecurityEvent(
                 user_id=token_row.user_id,
