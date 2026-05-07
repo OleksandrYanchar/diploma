@@ -156,7 +156,8 @@ async def execute_transfer(
 
     Enforces every validation check in a strict order and writes audit log
     entries for both successful and rejected transfers (SR-16).  Balance
-    arithmetic is performed atomically inside a savepoint (SR-20).
+    arithmetic is performed atomically inside a savepoint that holds a
+    row-level exclusive lock on both accounts (SR-20, H-3).
 
     The step-up threshold is enforced server-side: if ``request.amount`` is at
     or above ``settings.step_up_transfer_threshold`` (expressed in cents), the
@@ -173,6 +174,7 @@ async def execute_transfer(
             a different user, or already consumed (when amount >= threshold).
         HTTPException 422: Self-transfer attempt.
     """
+    # 1. TRANSFER_INITIATED audit — committed before any lock is acquired.
     await _write_audit(
         db=db,
         user_id=current_user.id,
@@ -185,83 +187,9 @@ async def execute_transfer(
         user_agent=user_agent,
     )
 
-    result = await db.execute(select(Account).where(Account.user_id == current_user.id))
-    from_account: Account | None = result.scalar_one_or_none()
-
-    if from_account is None:
-        await _write_audit(
-            db=db,
-            user_id=current_user.id,
-            action="TRANSFER_REJECTED",
-            details={"reason": "no_account"},
-            ip_address=ip_address,
-            user_agent=user_agent,
-        )
-        raise HTTPException(status_code=400, detail="No account found")
-
-    # Only ACTIVE accounts may initiate transfers (T-02).
-    if from_account.status != AccountStatus.ACTIVE:
-        await _write_audit(
-            db=db,
-            user_id=current_user.id,
-            action="TRANSFER_REJECTED",
-            details={
-                "reason": "account_not_active",
-                "account_id": str(from_account.id),
-            },
-            ip_address=ip_address,
-            user_agent=user_agent,
-        )
-        raise HTTPException(status_code=400, detail="Account is not active")
-
-    dest_result = await db.execute(
-        select(Account).where(Account.account_number == request.to_account_number)
-    )
-    to_account: Account | None = dest_result.scalar_one_or_none()
-
-    if to_account is None:
-        await _write_audit(
-            db=db,
-            user_id=current_user.id,
-            action="TRANSFER_REJECTED",
-            details={
-                "reason": "destination_not_found",
-                "to_account_number": request.to_account_number,
-            },
-            ip_address=ip_address,
-            user_agent=user_agent,
-        )
-        raise HTTPException(status_code=400, detail="Destination account not found")
-
-    if from_account.id == to_account.id:
-        await _write_audit(
-            db=db,
-            user_id=current_user.id,
-            action="TRANSFER_REJECTED",
-            details={
-                "reason": "self_transfer",
-                "account_id": str(from_account.id),
-            },
-            ip_address=ip_address,
-            user_agent=user_agent,
-        )
-        raise HTTPException(status_code=422, detail="Cannot transfer to own account")
-
-    # Reject transfers to INACTIVE or FROZEN destination accounts (T-02).
-    if to_account.status != AccountStatus.ACTIVE:
-        await _write_audit(
-            db=db,
-            user_id=current_user.id,
-            action="TRANSFER_REJECTED",
-            details={
-                "reason": "destination_not_active",
-                "to_account_number": request.to_account_number,
-            },
-            ip_address=ip_address,
-            user_agent=user_agent,
-        )
-        raise HTTPException(status_code=400, detail="Destination account is not active")
-
+    # 2. Step-up validation runs before the balance lock.  _validate_step_up_token
+    # may commit internally (STEP_UP_BYPASS_ATTEMPT audit) but does not hold any
+    # account row lock, so it is safe to call before begin_nested().
     threshold: Decimal = Decimal(settings.step_up_transfer_threshold) / Decimal(100)
     if request.amount >= threshold:
         try:
@@ -291,36 +219,120 @@ async def execute_transfer(
             )
             raise
 
-    if from_account.balance < request.amount:
+    # 3. Balance-safe locked section.
+    #
+    # SELECT ... FOR UPDATE acquires a row-level exclusive lock on both accounts.
+    # This prevents concurrent overdraft: a second transfer from the same source
+    # account will block at this SELECT until the first transaction commits.
+    # SR-20: balance arithmetic is performed inside the same savepoint.
+    #
+    # _write_audit() calls db.commit(), which would release the lock.  For that
+    # reason, rejection audit entries are written AFTER the begin_nested() block
+    # exits, using the captured ``_rejection`` dict.
+    _rejection: dict | None = None  # type: ignore[type-arg]
+    _rejection_exc: HTTPException | None = None
+    transaction: Transaction | None = None
+
+    try:
+        async with db.begin_nested():
+            # Source account — lock first so no concurrent transfer can read a
+            # stale balance while we compute the debit.
+            locked_source_result = await db.execute(
+                select(Account)
+                .where(Account.user_id == current_user.id)
+                .with_for_update()
+            )
+            from_account: Account | None = locked_source_result.scalar_one_or_none()
+
+            if from_account is None:
+                _rejection = {"reason": "no_account"}
+                raise HTTPException(status_code=400, detail="No account found")
+
+            # Only ACTIVE accounts may initiate transfers (T-02).
+            if from_account.status != AccountStatus.ACTIVE:
+                _rejection = {
+                    "reason": "account_not_active",
+                    "account_id": str(from_account.id),
+                }
+                raise HTTPException(status_code=400, detail="Account is not active")
+
+            # Destination account — lock to prevent concurrent inbound credit
+            # racing with our balance snapshot.
+            locked_dest_result = await db.execute(
+                select(Account)
+                .where(Account.account_number == request.to_account_number)
+                .with_for_update()
+            )
+            to_account: Account | None = locked_dest_result.scalar_one_or_none()
+
+            if to_account is None:
+                _rejection = {
+                    "reason": "destination_not_found",
+                    "to_account_number": request.to_account_number,
+                }
+                raise HTTPException(
+                    status_code=400, detail="Destination account not found"
+                )
+
+            if from_account.id == to_account.id:
+                _rejection = {
+                    "reason": "self_transfer",
+                    "account_id": str(from_account.id),
+                }
+                raise HTTPException(
+                    status_code=422, detail="Cannot transfer to own account"
+                )
+
+            # Reject transfers to INACTIVE or FROZEN destination accounts (T-02).
+            if to_account.status != AccountStatus.ACTIVE:
+                _rejection = {
+                    "reason": "destination_not_active",
+                    "to_account_number": request.to_account_number,
+                }
+                raise HTTPException(
+                    status_code=400, detail="Destination account is not active"
+                )
+
+            # Balance check inside the lock — no TOCTOU possible.
+            if from_account.balance < request.amount:
+                _rejection = {
+                    "reason": "insufficient_balance",
+                    "balance": str(from_account.balance),
+                    "requested": str(request.amount),
+                }
+                raise HTTPException(status_code=400, detail="Insufficient balance")
+
+            from_account.balance -= request.amount
+            to_account.balance += request.amount
+
+            transaction = Transaction(
+                from_account_id=from_account.id,
+                to_account_id=to_account.id,
+                amount=request.amount,
+                transaction_type=TransactionType.TRANSFER,
+                status=TransactionStatus.COMPLETED,
+                description=request.description,
+            )
+            db.add(transaction)
+            await db.flush()
+
+    except HTTPException as exc:
+        _rejection_exc = exc
+
+    # 4. Write TRANSFER_REJECTED audit OUTSIDE the locked block so the commit
+    # does not hold the row lock longer than necessary (SR-16).
+    if _rejection is not None and _rejection_exc is not None:
         await _write_audit(
             db=db,
             user_id=current_user.id,
             action="TRANSFER_REJECTED",
-            details={
-                "reason": "insufficient_balance",
-                "balance": str(from_account.balance),
-                "requested": str(request.amount),
-            },
+            details=_rejection,
             ip_address=ip_address,
             user_agent=user_agent,
         )
-        raise HTTPException(status_code=400, detail="Insufficient balance")
+        raise _rejection_exc
 
-    transaction: Transaction
-    async with db.begin_nested():
-        from_account.balance -= request.amount
-        to_account.balance += request.amount
-
-        transaction = Transaction(
-            from_account_id=from_account.id,
-            to_account_id=to_account.id,
-            amount=request.amount,
-            transaction_type=TransactionType.TRANSFER,
-            status=TransactionStatus.COMPLETED,
-            description=request.description,
-        )
-        db.add(transaction)
-        await db.flush()
+    assert transaction is not None  # unreachable if exception path taken above
 
     await db.commit()
     await db.refresh(transaction)
