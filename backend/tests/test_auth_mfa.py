@@ -819,6 +819,50 @@ async def test_unverified_user_cannot_disable_mfa(
 
 
 @pytest.mark.asyncio
+async def test_disable_mfa_wrong_password_triggers_lockout(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Repeated wrong-password calls to disable_mfa trigger account lockout (M-3/SR-05)."""
+    from tests.conftest import _TEST_SETTINGS
+
+    email = f"dmfa_lockout_{uuid.uuid4().hex[:8]}@example.com"
+    user_id, access_token, _ = await register_verify_login(async_client, capsys, email)
+
+    # Enable MFA first so disable_mfa checks can run (past the mfa_enabled guard).
+    setup_resp = await async_client.post(
+        _MFA_SETUP_URL, headers={"Authorization": f"Bearer {access_token}"}
+    )
+    assert setup_resp.status_code == 200
+    totp_secret = setup_resp.json()["secret"]
+    totp_code = pyotp.TOTP(totp_secret).now()
+    enable_resp = await async_client.post(
+        _MFA_ENABLE_URL,
+        json={"totp_code": totp_code},
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    assert enable_resp.status_code == 200
+
+    max_attempts = _TEST_SETTINGS.max_failed_login_attempts
+    for _ in range(max_attempts):
+        resp = await async_client.post(
+            _MFA_DISABLE_URL,
+            json={"password": "WrongPassword99!", "totp_code": "000000"},
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        assert resp.status_code == 401
+
+    result = await db_session.execute(
+        select(User).where(User.id == uuid.UUID(user_id))
+    )
+    locked_user = result.scalar_one()
+    assert locked_user.locked_until is not None, (
+        "Account must be locked after repeated wrong-password submissions to disable_mfa (M-3)"
+    )
+
+
+@pytest.mark.asyncio
 async def test_mfa_disable_login_no_longer_requires_totp_after_disable(
     async_client: AsyncClient,
     capsys: pytest.CaptureFixture[str],

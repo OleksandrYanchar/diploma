@@ -607,13 +607,15 @@ async def disable_mfa(
     password: str,
     totp_code: str,
     db: AsyncSession,
+    settings: Settings,
     ip_address: str | None = None,
     user_agent: str | None = None,
 ) -> None:
     """Disable MFA for the user after verifying both password and current TOTP code.
 
-    Enforces SR-04 (TOTP gate deactivation requires confirmed identity) and
-    SR-16 (audit log on MFA_FAILED and MFA_DISABLED events).
+    Enforces SR-04 (TOTP gate deactivation requires confirmed identity), SR-05
+    (account lockout after repeated failures on this sensitive operation), and
+    SR-16 (audit log on MFA_FAILED, ACCOUNT_LOCKED, and MFA_DISABLED events).
 
     The two-factor check (password + TOTP) prevents an attacker who has only
     stolen a valid access token from silently disabling the MFA gate.  Both
@@ -630,6 +632,10 @@ async def disable_mfa(
         HTTPException 401: If the supplied TOTP code is invalid, with a
             MFA_FAILED audit log entry committed before raising.
     """
+
+    def _utcnow() -> datetime:
+        return datetime.now(timezone.utc)
+
     if not user.mfa_enabled:
         raise HTTPException(
             status_code=400,
@@ -637,6 +643,42 @@ async def disable_mfa(
         )
 
     if not verify_password(password, user.hashed_password):
+        user.failed_login_count += 1
+
+        if user.failed_login_count >= settings.max_failed_login_attempts:
+            user.locked_until = _utcnow() + timedelta(
+                minutes=settings.account_lockout_minutes
+            )
+            user.failed_login_count = 0
+            db.add(
+                SecurityEvent(
+                    user_id=user.id,
+                    event_type="ACCOUNT_LOCKED",
+                    severity=Severity.HIGH,
+                    ip_address=ip_address,
+                    details={
+                        "locked_until": user.locked_until.isoformat()
+                        if user.locked_until
+                        else None,
+                        "trigger": "disable_mfa_password_failure",
+                    },
+                )
+            )
+            db.add(
+                AuditLog(
+                    user_id=user.id,
+                    action="ACCOUNT_LOCKED",
+                    ip_address=ip_address,
+                    user_agent=user_agent,
+                    details={
+                        "locked_until": user.locked_until.isoformat()
+                        if user.locked_until
+                        else None,
+                        "trigger": "disable_mfa_password_failure",
+                    },
+                )
+            )
+
         db.add(
             AuditLog(
                 user_id=user.id,
@@ -653,6 +695,42 @@ async def disable_mfa(
         )
 
     if not verify_totp_code(user.mfa_secret, totp_code):
+        user.failed_login_count += 1
+
+        if user.failed_login_count >= settings.max_failed_login_attempts:
+            user.locked_until = _utcnow() + timedelta(
+                minutes=settings.account_lockout_minutes
+            )
+            user.failed_login_count = 0
+            db.add(
+                SecurityEvent(
+                    user_id=user.id,
+                    event_type="ACCOUNT_LOCKED",
+                    severity=Severity.HIGH,
+                    ip_address=ip_address,
+                    details={
+                        "locked_until": user.locked_until.isoformat()
+                        if user.locked_until
+                        else None,
+                        "trigger": "disable_mfa_totp_failure",
+                    },
+                )
+            )
+            db.add(
+                AuditLog(
+                    user_id=user.id,
+                    action="ACCOUNT_LOCKED",
+                    ip_address=ip_address,
+                    user_agent=user_agent,
+                    details={
+                        "locked_until": user.locked_until.isoformat()
+                        if user.locked_until
+                        else None,
+                        "trigger": "disable_mfa_totp_failure",
+                    },
+                )
+            )
+
         db.add(
             AuditLog(
                 user_id=user.id,
@@ -686,6 +764,7 @@ async def change_password(
     current_password: str,
     new_password: str,
     db: AsyncSession,
+    settings: Settings,
     ip_address: str | None = None,
     user_agent: str | None = None,
 ) -> None:
@@ -693,6 +772,9 @@ async def change_password(
 
     Verifies current_password against the stored Argon2id hash.
     Enforces SR-01 strength policy on new_password before hashing.
+    Enforces SR-05 account lockout after repeated wrong-password attempts so that
+    an attacker who has obtained a valid access token cannot brute-force the
+    current password via this endpoint without triggering a lockout.
     Writes a PASSWORD_CHANGED audit log entry on success (SR-16).
     Does not revoke existing sessions — see ADR-21.
 
@@ -700,7 +782,57 @@ async def change_password(
         HTTPException 401: If current_password does not match the stored hash.
         HTTPException 422: If new_password fails the SR-01 strength policy.
     """
+
+    def _utcnow() -> datetime:
+        return datetime.now(timezone.utc)
+
     if not verify_password(current_password, user.hashed_password):
+        user.failed_login_count += 1
+
+        if user.failed_login_count >= settings.max_failed_login_attempts:
+            user.locked_until = _utcnow() + timedelta(
+                minutes=settings.account_lockout_minutes
+            )
+            user.failed_login_count = 0
+            db.add(
+                SecurityEvent(
+                    user_id=user.id,
+                    event_type="ACCOUNT_LOCKED",
+                    severity=Severity.HIGH,
+                    ip_address=ip_address,
+                    details={
+                        "locked_until": user.locked_until.isoformat()
+                        if user.locked_until
+                        else None,
+                        "trigger": "change_password_failure",
+                    },
+                )
+            )
+            db.add(
+                AuditLog(
+                    user_id=user.id,
+                    action="ACCOUNT_LOCKED",
+                    ip_address=ip_address,
+                    user_agent=user_agent,
+                    details={
+                        "locked_until": user.locked_until.isoformat()
+                        if user.locked_until
+                        else None,
+                        "trigger": "change_password_failure",
+                    },
+                )
+            )
+
+        db.add(
+            AuditLog(
+                user_id=user.id,
+                action="PASSWORD_CHANGE_FAILED",
+                ip_address=ip_address,
+                user_agent=user_agent,
+                details={"reason": "invalid_current_password"},
+            )
+        )
+        await db.commit()
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     if not is_password_strong(new_password):

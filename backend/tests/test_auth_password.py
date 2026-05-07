@@ -811,6 +811,39 @@ async def test_reset_confirm_audit_log_written(
 
 
 @pytest.mark.asyncio
+async def test_change_password_wrong_password_triggers_lockout(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    fake_redis,
+) -> None:
+    """Repeated wrong-password calls to change_password trigger account lockout (M-3/SR-05)."""
+    email = f"cpw_lockout_{uuid.uuid4().hex[:8]}@example.com"
+    user, access_token = await make_orm_user(
+        db_session, fake_redis, email, password=_STRONG_PASSWORD
+    )
+
+    max_attempts = _TEST_SETTINGS.max_failed_login_attempts
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    for _ in range(max_attempts):
+        resp = await async_client.post(
+            _PASSWORD_CHANGE_URL,
+            json={"current_password": "WrongPassword99!", "new_password": "NewPass123!@"},
+            headers=headers,
+        )
+        assert resp.status_code == 401
+
+    # After max_attempts failures, account should be locked.
+    result = await db_session.execute(
+        select(User).where(User.id == user.id)
+    )
+    locked_user = result.scalar_one()
+    assert locked_user.locked_until is not None, (
+        "Account must be locked after repeated wrong-password submissions (M-3)"
+    )
+
+
+@pytest.mark.asyncio
 async def test_password_reset_token_is_single_use(
     async_client: AsyncClient,
     db_session: AsyncSession,
