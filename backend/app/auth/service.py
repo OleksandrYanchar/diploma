@@ -458,7 +458,7 @@ async def refresh_tokens(
             .values(revoked=True)
         )
 
-        # Collect all session keys for deletion (after the UPDATE so we capture all rows).
+        # Collect all session keys for deletion (after the UPDATE so we capture all rows).  # noqa: E501
         user_rt_result = await db.execute(
             select(RefreshToken).where(RefreshToken.user_id == token_row.user_id)
         )

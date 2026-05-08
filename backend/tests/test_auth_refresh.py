@@ -270,9 +270,9 @@ async def test_refresh_reuse_detection_revokes_sibling_db_token(
     sibling_resp = await async_client.post(
         _REFRESH_URL, json={"refresh_token": refresh_token_2}
     )
-    assert sibling_resp.status_code == 401, (
-        "Sibling refresh token must be rejected after reuse detection"
-    )
+    assert (
+        sibling_resp.status_code == 401
+    ), "Sibling refresh token must be rejected after reuse detection"
 
     # Verify the DB row for token_2 is marked revoked.
     token_2_hash = hash_token(refresh_token_2)
@@ -290,7 +290,7 @@ async def test_refresh_reuse_detection_writes_audit_log(
     db_session: AsyncSession,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """TOKEN_REUSE_DETECTED AuditLog entry is written on refresh token replay (TD-12/SR-16)."""
+    """TOKEN_REUSE_DETECTED AuditLog written on refresh token replay (TD-12/SR-16)."""
     email = f"reuse_audit_{uuid.uuid4().hex[:8]}@example.com"
     user_id_str, _access, refresh_token_1 = await register_verify_login(
         async_client, capsys, email

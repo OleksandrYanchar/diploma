@@ -824,7 +824,7 @@ async def test_disable_mfa_wrong_password_triggers_lockout(
     db_session: AsyncSession,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Repeated wrong-password calls to disable_mfa trigger account lockout (M-3/SR-05)."""
+    """Repeated wrong-password calls to disable_mfa trigger lockout (M-3/SR-05)."""
     from tests.conftest import _TEST_SETTINGS
 
     email = f"dmfa_lockout_{uuid.uuid4().hex[:8]}@example.com"
@@ -853,13 +853,11 @@ async def test_disable_mfa_wrong_password_triggers_lockout(
         )
         assert resp.status_code == 401
 
-    result = await db_session.execute(
-        select(User).where(User.id == uuid.UUID(user_id))
-    )
+    result = await db_session.execute(select(User).where(User.id == uuid.UUID(user_id)))
     locked_user = result.scalar_one()
-    assert locked_user.locked_until is not None, (
-        "Account must be locked after repeated wrong-password submissions to disable_mfa (M-3)"
-    )
+    assert (
+        locked_user.locked_until is not None
+    ), "Account must be locked after repeated wrong-password failures (M-3)"
 
 
 @pytest.mark.asyncio
