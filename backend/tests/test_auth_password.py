@@ -886,3 +886,185 @@ async def test_password_reset_token_is_single_use(
     assert (
         second_response.status_code == 400
     ), "Reusing a password reset token after successful use must return 400 (SR-18)"
+
+
+# ---------------------------------------------------------------------------
+# TD-13: confirm_password_reset failure paths must write AuditLog entries
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_confirm_password_reset_invalid_token_writes_failed_audit(
+    db_session: AsyncSession,
+    fake_redis,
+) -> None:
+    """Token hash not found in DB writes PASSWORD_RESET_FAILED audit with user_id=None.
+
+    TD-13 / SR-16.
+    """
+    with pytest.raises(HTTPException) as exc_info:
+        await confirm_password_reset(
+            "bogus-token-that-has-no-matching-hash",
+            _RESET_STRONG_PASSWORD,
+            db_session,
+            fake_redis,
+            _TEST_SETTINGS,
+        )
+
+    assert exc_info.value.status_code == 400
+
+    result = await db_session.execute(
+        select(AuditLog).where(
+            AuditLog.action == "PASSWORD_RESET_FAILED",
+            AuditLog.user_id.is_(None),
+        )
+    )
+    entries = result.scalars().all()
+    assert (
+        entries
+    ), "Expected at least one PASSWORD_RESET_FAILED audit entry for unknown token"
+    reasons = [e.details["reason"] for e in entries if e.details]
+    assert "token_not_found" in reasons, f"Expected reason=token_not_found in {reasons}"
+
+
+@pytest.mark.asyncio
+async def test_confirm_password_reset_expired_token_writes_failed_audit(
+    db_session: AsyncSession,
+    fake_redis,
+) -> None:
+    """Expired token writes PASSWORD_RESET_FAILED audit with reason=token_expired.
+
+    TD-13 / SR-16.
+    """
+    email = f"reset_expired_audit_{uuid.uuid4().hex[:8]}@example.com"
+    user, _ = await make_orm_user(db_session, fake_redis, email)
+
+    raw_token = generate_refresh_token()
+    user.password_reset_token_hash = hash_token(raw_token)
+    user.password_reset_sent_at = datetime.now(timezone.utc) - timedelta(minutes=31)
+    await db_session.commit()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await confirm_password_reset(
+            raw_token,
+            _RESET_STRONG_PASSWORD,
+            db_session,
+            fake_redis,
+            _TEST_SETTINGS,
+        )
+
+    assert exc_info.value.status_code == 400
+
+    result = await db_session.execute(
+        select(AuditLog).where(
+            AuditLog.action == "PASSWORD_RESET_FAILED",
+            AuditLog.user_id == user.id,
+        )
+    )
+    entry = result.scalar_one_or_none()
+    assert (
+        entry is not None
+    ), "Expected PASSWORD_RESET_FAILED audit entry for expired token"
+    assert entry.details is not None
+    assert entry.details["reason"] == "token_expired"
+
+
+@pytest.mark.asyncio
+async def test_confirm_password_reset_weak_password_writes_policy_audit(
+    db_session: AsyncSession,
+    fake_redis,
+) -> None:
+    """Valid token + weak password writes PASSWORD_RESET_POLICY_FAILED.
+
+    Token must remain unconsumed so the user can retry. TD-13 / SR-16.
+    """
+    email = f"reset_policy_audit_{uuid.uuid4().hex[:8]}@example.com"
+    user, _ = await make_orm_user(db_session, fake_redis, email)
+
+    raw_token = generate_refresh_token()
+    token_hash = hash_token(raw_token)
+    user.password_reset_token_hash = token_hash
+    user.password_reset_sent_at = datetime.now(timezone.utc)
+    await db_session.commit()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await confirm_password_reset(
+            raw_token,
+            _RESET_WEAK_PASSWORD,
+            db_session,
+            fake_redis,
+            _TEST_SETTINGS,
+        )
+
+    assert exc_info.value.status_code == 422
+
+    # Policy failure audit must be written.
+    result = await db_session.execute(
+        select(AuditLog).where(
+            AuditLog.action == "PASSWORD_RESET_POLICY_FAILED",
+            AuditLog.user_id == user.id,
+        )
+    )
+    entry = result.scalar_one_or_none()
+    assert entry is not None, "Expected PASSWORD_RESET_POLICY_FAILED audit entry"
+    assert entry.details is not None
+    assert entry.details["reason"] == "weak_new_password"
+
+    # Token must NOT be consumed — user can retry with a strong password.
+    await db_session.refresh(user)
+    assert (
+        user.password_reset_token_hash == token_hash
+    ), "Token must remain set after policy failure"
+
+    # SUCCESS audit must not have been written.
+    completed = await db_session.execute(
+        select(AuditLog).where(
+            AuditLog.action == "PASSWORD_RESET_COMPLETED",
+            AuditLog.user_id == user.id,
+        )
+    )
+    assert (
+        completed.scalar_one_or_none() is None
+    ), "PASSWORD_RESET_COMPLETED must not be written on policy failure"
+
+
+@pytest.mark.asyncio
+async def test_confirm_password_reset_missing_sent_at_writes_failed_audit(
+    db_session: AsyncSession,
+    fake_redis,
+) -> None:
+    """Token hash present but sent_at is None writes PASSWORD_RESET_FAILED.
+
+    TD-13 / SR-16.
+    """
+    email = f"reset_missing_ts_{uuid.uuid4().hex[:8]}@example.com"
+    user, _ = await make_orm_user(db_session, fake_redis, email)
+
+    raw_token = generate_refresh_token()
+    user.password_reset_token_hash = hash_token(raw_token)
+    user.password_reset_sent_at = None  # defensive branch
+    await db_session.commit()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await confirm_password_reset(
+            raw_token,
+            _RESET_STRONG_PASSWORD,
+            db_session,
+            fake_redis,
+            _TEST_SETTINGS,
+        )
+
+    assert exc_info.value.status_code == 400
+
+    result = await db_session.execute(
+        select(AuditLog).where(
+            AuditLog.action == "PASSWORD_RESET_FAILED",
+            AuditLog.user_id == user.id,
+        )
+    )
+    entry = result.scalar_one_or_none()
+    assert (
+        entry is not None
+    ), "Expected PASSWORD_RESET_FAILED audit entry for missing sent_at"
+    assert entry.details is not None
+    assert entry.details["reason"] == "missing_sent_at"

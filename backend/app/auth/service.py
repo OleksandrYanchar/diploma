@@ -30,7 +30,8 @@ Security properties enforced:
 - SR-16: Audit log entries created for REGISTER, EMAIL_VERIFIED, LOGIN_SUCCESS,
   LOGIN_FAILED, ACCOUNT_LOCKED, LOGOUT, TOKEN_REFRESHED, MFA_SETUP_INITIATED,
   MFA_ENABLED, MFA_FAILED, LOGIN_MFA_REQUIRED, MFA_VERIFIED, STEP_UP_VERIFIED,
-  STEP_UP_FAILED, PASSWORD_RESET_REQUESTED, and PASSWORD_RESET_COMPLETED events.
+  STEP_UP_FAILED, PASSWORD_RESET_REQUESTED, PASSWORD_RESET_COMPLETED,
+  PASSWORD_RESET_FAILED, and PASSWORD_RESET_POLICY_FAILED events.
 - SR-18: Password reset tokens stored as SHA-256 hash only; raw token delivered
   out-of-band (console in demo mode).  All sessions and refresh tokens are
   revoked on a successful password reset so that the account is fully
@@ -930,6 +931,10 @@ async def confirm_password_reset(
     and refresh-token revocation on password reset so the account is fully
     re-authenticated after the credential change).
 
+    Writes a PASSWORD_RESET_FAILED AuditLog entry before raising on token-validation
+    failures, and a PASSWORD_RESET_POLICY_FAILED entry before raising on
+    password-strength failure, so all failure paths produce an audit record (SR-16).
+
     Raises:
         HTTPException 400: If the token is not found or has expired.
         HTTPException 422: If new_password fails the SR-01 strength policy.
@@ -941,6 +946,16 @@ async def confirm_password_reset(
     user = result.scalar_one_or_none()
 
     if user is None:
+        db.add(
+            AuditLog(
+                user_id=None,
+                action="PASSWORD_RESET_FAILED",
+                ip_address=ip_address,
+                user_agent=user_agent,
+                details={"reason": "token_not_found"},
+            )
+        )
+        await db.commit()
         raise HTTPException(
             status_code=400,
             detail="Invalid or expired reset token",
@@ -948,6 +963,16 @@ async def confirm_password_reset(
 
     sent_at = user.password_reset_sent_at
     if sent_at is None:
+        db.add(
+            AuditLog(
+                user_id=user.id,
+                action="PASSWORD_RESET_FAILED",
+                ip_address=ip_address,
+                user_agent=user_agent,
+                details={"reason": "missing_sent_at"},
+            )
+        )
+        await db.commit()
         raise HTTPException(
             status_code=400,
             detail="Invalid or expired reset token",
@@ -958,12 +983,32 @@ async def confirm_password_reset(
 
     expiry_window = timedelta(minutes=settings.password_reset_token_ttl_minutes)
     if datetime.now(timezone.utc) > sent_at + expiry_window:
+        db.add(
+            AuditLog(
+                user_id=user.id,
+                action="PASSWORD_RESET_FAILED",
+                ip_address=ip_address,
+                user_agent=user_agent,
+                details={"reason": "token_expired"},
+            )
+        )
+        await db.commit()
         raise HTTPException(
             status_code=400,
             detail="Invalid or expired reset token",
         )
 
     if not is_password_strong(new_password):
+        db.add(
+            AuditLog(
+                user_id=user.id,
+                action="PASSWORD_RESET_POLICY_FAILED",
+                ip_address=ip_address,
+                user_agent=user_agent,
+                details={"reason": "weak_new_password"},
+            )
+        )
+        await db.commit()
         raise HTTPException(
             status_code=422,
             detail="Password does not meet strength requirements",
