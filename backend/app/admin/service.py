@@ -14,7 +14,7 @@ Security properties:
 import uuid
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.audit_log import AuditLog
@@ -105,6 +105,7 @@ async def unlock_user(
     actor: User,
     user_id: uuid.UUID,
     ip_address: str | None,
+    user_agent: str | None = None,
 ) -> User:
     """Clear the lockout state of a target user (ADMIN action).
 
@@ -123,6 +124,7 @@ async def unlock_user(
                 user_id=None,
                 action="ADMIN_UNLOCK_USER",
                 ip_address=ip_address,
+                user_agent=user_agent,
                 details={
                     "actor_id": str(actor.id),
                     "target_id": str(user_id),
@@ -141,6 +143,7 @@ async def unlock_user(
             user_id=target.id,
             action="ADMIN_UNLOCK_USER",
             ip_address=ip_address,
+            user_agent=user_agent,
             details={"actor_id": str(actor.id), "result": "success"},
         )
     )
@@ -154,6 +157,7 @@ async def activate_user(
     actor: User,
     user_id: uuid.UUID,
     ip_address: str | None,
+    user_agent: str | None = None,
 ) -> User:
     """Set ``is_active = True`` on a target user (ADMIN action).
 
@@ -171,6 +175,7 @@ async def activate_user(
                 user_id=None,
                 action="ADMIN_ACTIVATE_USER",
                 ip_address=ip_address,
+                user_agent=user_agent,
                 details={
                     "actor_id": str(actor.id),
                     "target_id": str(user_id),
@@ -188,6 +193,7 @@ async def activate_user(
             user_id=target.id,
             action="ADMIN_ACTIVATE_USER",
             ip_address=ip_address,
+            user_agent=user_agent,
             details={"actor_id": str(actor.id), "result": "success"},
         )
     )
@@ -201,14 +207,18 @@ async def deactivate_user(
     actor: User,
     user_id: uuid.UUID,
     ip_address: str | None,
+    user_agent: str | None = None,
 ) -> User:
     """Set ``is_active = False`` on a target user (ADMIN action).
 
-    Emits an audit log entry for success, 404, and self-guard failure.
+    Emits an audit log entry for success, 404, self-guard, and last-admin-guard
+    failure outcomes.
 
     Raises:
         HTTPException 404: Target user does not exist.
         HTTPException 403: Admin attempted to deactivate their own account.
+        HTTPException 403: Deactivating the target would remove the last active
+            administrator, leaving the system without any admin access (H-1).
     """
     result = await db.execute(select(User).where(User.id == user_id))
     target: User | None = result.scalar_one_or_none()
@@ -219,6 +229,7 @@ async def deactivate_user(
                 user_id=None,
                 action="ADMIN_DEACTIVATE_USER",
                 ip_address=ip_address,
+                user_agent=user_agent,
                 details={
                     "actor_id": str(actor.id),
                     "target_id": str(user_id),
@@ -236,6 +247,7 @@ async def deactivate_user(
                 user_id=target.id,
                 action="ADMIN_DEACTIVATE_USER",
                 ip_address=ip_address,
+                user_agent=user_agent,
                 details={
                     "actor_id": str(actor.id),
                     "result": "failure",
@@ -249,12 +261,42 @@ async def deactivate_user(
             detail="Cannot deactivate your own account",
         )
 
+    # H-1: Prevent deactivating the last active administrator.
+    if target.role == UserRole.ADMIN:
+        admin_count_result = await db.execute(
+            select(func.count()).where(
+                User.role == UserRole.ADMIN,
+                User.is_active.is_(True),
+            )
+        )
+        active_admin_count: int = admin_count_result.scalar_one()
+        if active_admin_count <= 1:
+            db.add(
+                AuditLog(
+                    user_id=target.id,
+                    action="ADMIN_DEACTIVATE_USER",
+                    ip_address=ip_address,
+                    user_agent=user_agent,
+                    details={
+                        "actor_id": str(actor.id),
+                        "result": "failure",
+                        "reason": "last_admin_guard",
+                    },
+                )
+            )
+            await db.commit()
+            raise HTTPException(
+                status_code=403,
+                detail="Cannot deactivate the last active administrator",
+            )
+
     target.is_active = False
     db.add(
         AuditLog(
             user_id=target.id,
             action="ADMIN_DEACTIVATE_USER",
             ip_address=ip_address,
+            user_agent=user_agent,
             details={"actor_id": str(actor.id), "result": "success"},
         )
     )
@@ -269,6 +311,7 @@ async def change_user_role(
     user_id: uuid.UUID,
     new_role: UserRole,
     ip_address: str | None,
+    user_agent: str | None = None,
 ) -> User:
     """Change the role of a target user (ADMIN action).
 
@@ -277,6 +320,8 @@ async def change_user_role(
     Raises:
         HTTPException 404: Target user does not exist.
         HTTPException 403: Admin attempted to change their own role.
+        HTTPException 403: Demoting the target would remove the last active
+            administrator, leaving the system without any admin access (H-1).
     """
     result = await db.execute(select(User).where(User.id == user_id))
     target: User | None = result.scalar_one_or_none()
@@ -287,6 +332,7 @@ async def change_user_role(
                 user_id=None,
                 action="ADMIN_ROLE_CHANGE",
                 ip_address=ip_address,
+                user_agent=user_agent,
                 details={
                     "actor_id": str(actor.id),
                     "target_id": str(user_id),
@@ -304,6 +350,7 @@ async def change_user_role(
                 user_id=target.id,
                 action="ADMIN_ROLE_CHANGE",
                 ip_address=ip_address,
+                user_agent=user_agent,
                 details={
                     "actor_id": str(actor.id),
                     "result": "failure",
@@ -317,6 +364,35 @@ async def change_user_role(
             detail="Cannot change your own role",
         )
 
+    # H-1: Prevent demoting the last active administrator to a non-admin role.
+    if target.role == UserRole.ADMIN and new_role != UserRole.ADMIN:
+        admin_count_result = await db.execute(
+            select(func.count()).where(
+                User.role == UserRole.ADMIN,
+                User.is_active.is_(True),
+            )
+        )
+        active_admin_count: int = admin_count_result.scalar_one()
+        if active_admin_count - 1 < 1:
+            db.add(
+                AuditLog(
+                    user_id=target.id,
+                    action="ADMIN_ROLE_CHANGE",
+                    ip_address=ip_address,
+                    user_agent=user_agent,
+                    details={
+                        "actor_id": str(actor.id),
+                        "result": "failure",
+                        "reason": "last_admin_guard",
+                    },
+                )
+            )
+            await db.commit()
+            raise HTTPException(
+                status_code=403,
+                detail="Cannot remove the last active administrator",
+            )
+
     previous_role = target.role.value
     target.role = new_role
     db.add(
@@ -324,6 +400,7 @@ async def change_user_role(
             user_id=target.id,
             action="ADMIN_ROLE_CHANGE",
             ip_address=ip_address,
+            user_agent=user_agent,
             details={
                 "actor_id": str(actor.id),
                 "previous_role": previous_role,

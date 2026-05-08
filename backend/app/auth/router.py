@@ -484,6 +484,7 @@ async def mfa_disable(
     current_user: User = Depends(get_current_user),
     _verified: None = Depends(require_verified),
     db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
 ) -> dict[str, str]:
     """Deactivate the MFA gate on the authenticated account.
 
@@ -494,8 +495,9 @@ async def mfa_disable(
     On success, ``user.mfa_enabled`` is set to False, ``user.mfa_secret``
     is cleared, and an MFA_DISABLED audit log entry is written (SR-16).
 
-    On an invalid TOTP code, an MFA_FAILED audit log entry is committed
-    before the 401 is returned (SR-16).
+    On an invalid TOTP code or password, an MFA_FAILED audit log entry is
+    committed before the 401 is returned (SR-16).  Repeated failures trigger
+    account lockout (SR-05, M-3).
 
     Args:
         request:      The incoming FastAPI Request, used to extract IP and
@@ -503,6 +505,7 @@ async def mfa_disable(
         body:         Validated ``MFADisableRequest`` (password + totp_code).
         current_user: Authenticated User provided by ``get_current_user``.
         db:           Injected async database session.
+        settings:     Injected application settings (lockout thresholds, SR-05).
 
     Returns:
         A success message dict with HTTP 200.
@@ -522,6 +525,7 @@ async def mfa_disable(
         password=body.password,
         totp_code=body.totp_code,
         db=db,
+        settings=settings,
         ip_address=ip_address,
         user_agent=user_agent,
     )
@@ -538,12 +542,14 @@ async def password_change(
     body: PasswordChangeRequest,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
 ) -> dict[str, str]:
     """Change the authenticated user's password.
 
     Verifies the current password, enforces the SR-01 strength policy on the
     new password, and writes a PASSWORD_CHANGED audit log entry on success
-    (SR-16).  Existing sessions are NOT revoked — see ADR-21 for rationale.
+    (SR-16).  Repeated wrong-password submissions trigger account lockout (SR-05,
+    M-3).  Existing sessions are NOT revoked — see ADR-21 for rationale.
 
     Requires authentication (AUTHENTICATED access level per API_SCOPE.md).
     Email verification is not required for this endpoint.
@@ -555,6 +561,7 @@ async def password_change(
                       new_password).
         current_user: Authenticated User provided by ``get_current_user``.
         db:           Injected async database session.
+        settings:     Injected application settings (lockout thresholds, SR-05).
 
     Returns:
         A success message dict with HTTP 200.
@@ -573,6 +580,7 @@ async def password_change(
         current_password=body.current_password,
         new_password=body.new_password,
         db=db,
+        settings=settings,
         ip_address=ip_address,
         user_agent=user_agent,
     )

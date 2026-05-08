@@ -169,9 +169,16 @@ async def unlock_user(
         HTTPException 401/403: Unauthenticated, unverified, or wrong role.
         HTTPException 404: Target user does not exist.
     """
-    ip = request.client.host if request.client else None
+    ip_address = request.headers.get("X-Real-IP") or (
+        request.client.host if request.client else None
+    )
+    user_agent = request.headers.get("User-Agent")
     user = await service.unlock_user(
-        db=db, actor=current_user, user_id=user_id, ip_address=ip
+        db=db,
+        actor=current_user,
+        user_id=user_id,
+        ip_address=ip_address,
+        user_agent=user_agent,
     )
     return UserAdminView.model_validate(user)
 
@@ -196,9 +203,16 @@ async def activate_user(
         HTTPException 401/403: Unauthenticated, unverified, or wrong role.
         HTTPException 404: Target user does not exist.
     """
-    ip = request.client.host if request.client else None
+    ip_address = request.headers.get("X-Real-IP") or (
+        request.client.host if request.client else None
+    )
+    user_agent = request.headers.get("User-Agent")
     user = await service.activate_user(
-        db=db, actor=current_user, user_id=user_id, ip_address=ip
+        db=db,
+        actor=current_user,
+        user_id=user_id,
+        ip_address=ip_address,
+        user_agent=user_agent,
     )
     return UserAdminView.model_validate(user)
 
@@ -224,9 +238,16 @@ async def deactivate_user(
         HTTPException 403: Admin attempted to deactivate their own account.
         HTTPException 404: Target user does not exist.
     """
-    ip = request.client.host if request.client else None
+    ip_address = request.headers.get("X-Real-IP") or (
+        request.client.host if request.client else None
+    )
+    user_agent = request.headers.get("User-Agent")
     user = await service.deactivate_user(
-        db=db, actor=current_user, user_id=user_id, ip_address=ip
+        db=db,
+        actor=current_user,
+        user_id=user_id,
+        ip_address=ip_address,
+        user_agent=user_agent,
     )
     return UserAdminView.model_validate(user)
 
@@ -257,12 +278,16 @@ async def change_user_role(
         HTTPException 404: Target user does not exist.
         HTTPException 422: ``role`` value is not a valid ``UserRole``.
     """
-    ip = request.client.host if request.client else None
+    ip_address = request.headers.get("X-Real-IP") or (
+        request.client.host if request.client else None
+    )
+    user_agent = request.headers.get("User-Agent")
     user = await service.change_user_role(
         db=db,
         actor=current_user,
         user_id=user_id,
         new_role=body.role,
-        ip_address=ip,
+        ip_address=ip_address,
+        user_agent=user_agent,
     )
     return UserAdminView.model_validate(user)

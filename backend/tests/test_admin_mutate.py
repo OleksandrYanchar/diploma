@@ -564,3 +564,94 @@ async def test_role_change_self_writes_audit_log(
     assert log is not None
     assert log.details["result"] == "failure"
     assert log.details["reason"] == "self_role_change_blocked"
+
+
+@pytest.mark.asyncio
+async def test_activate_auditor_role_returns_403(
+    async_client: AsyncClient,
+    fake_redis: fakeredis.FakeRedis,
+    db_session: AsyncSession,
+) -> None:
+    """AUDITOR role cannot call activate (SR-11)."""
+    _, token = await _make_inline_user(db_session, fake_redis, UserRole.AUDITOR)
+    target, _ = await _make_inline_user(db_session, fake_redis, UserRole.USER)
+
+    response = await async_client.patch(
+        _ACTIVATE_URL.format(target.id),
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_deactivate_auditor_role_returns_403(
+    async_client: AsyncClient,
+    fake_redis: fakeredis.FakeRedis,
+    db_session: AsyncSession,
+) -> None:
+    """AUDITOR role cannot call deactivate (SR-11)."""
+    _, token = await _make_inline_user(db_session, fake_redis, UserRole.AUDITOR)
+    target, _ = await _make_inline_user(db_session, fake_redis, UserRole.USER)
+
+    response = await async_client.patch(
+        _DEACTIVATE_URL.format(target.id),
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_role_change_auditor_role_returns_403(
+    async_client: AsyncClient,
+    fake_redis: fakeredis.FakeRedis,
+    db_session: AsyncSession,
+) -> None:
+    """AUDITOR role cannot call role change (SR-11)."""
+    _, token = await _make_inline_user(db_session, fake_redis, UserRole.AUDITOR)
+    target, _ = await _make_inline_user(db_session, fake_redis, UserRole.USER)
+
+    response = await async_client.patch(
+        _ROLE_URL.format(target.id),
+        json={"role": "user"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_role_change_guard_does_not_block_when_multiple_admins(
+    async_client: AsyncClient,
+    fake_redis: fakeredis.FakeRedis,
+    db_session: AsyncSession,
+) -> None:
+    """Demoting one admin is allowed when multiple admins exist (H-1 guard sanity)."""
+    actor, actor_token = await _make_inline_user(db_session, fake_redis, UserRole.ADMIN)
+    target, _ = await _make_inline_user(db_session, fake_redis, UserRole.ADMIN)
+
+    response = await async_client.patch(
+        _ROLE_URL.format(target.id),
+        json={"role": "user"},
+        headers={"Authorization": f"Bearer {actor_token}"},
+    )
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_deactivate_does_not_block_when_multiple_admins(
+    async_client: AsyncClient,
+    fake_redis: fakeredis.FakeRedis,
+    db_session: AsyncSession,
+) -> None:
+    """Deactivating an admin is allowed when another active admin exists (H-1 guard)."""
+    actor, actor_token = await _make_inline_user(db_session, fake_redis, UserRole.ADMIN)
+    target_admin, _ = await _make_inline_user(db_session, fake_redis, UserRole.ADMIN)
+
+    # Two active admins — deactivating target_admin leaves actor as sole admin.
+    # Guard fires when count <= 1; count == 2 here so guard does not fire.
+    response = await async_client.patch(
+        _DEACTIVATE_URL.format(target_admin.id),
+        headers={"Authorization": f"Bearer {actor_token}"},
+    )
+    assert (
+        response.status_code == 200
+    ), "Deactivating one admin when two exist must succeed"

@@ -30,7 +30,8 @@ Security properties enforced:
 - SR-16: Audit log entries created for REGISTER, EMAIL_VERIFIED, LOGIN_SUCCESS,
   LOGIN_FAILED, ACCOUNT_LOCKED, LOGOUT, TOKEN_REFRESHED, MFA_SETUP_INITIATED,
   MFA_ENABLED, MFA_FAILED, LOGIN_MFA_REQUIRED, MFA_VERIFIED, STEP_UP_VERIFIED,
-  STEP_UP_FAILED, PASSWORD_RESET_REQUESTED, and PASSWORD_RESET_COMPLETED events.
+  STEP_UP_FAILED, PASSWORD_RESET_REQUESTED, PASSWORD_RESET_COMPLETED,
+  PASSWORD_RESET_FAILED, and PASSWORD_RESET_POLICY_FAILED events.
 - SR-18: Password reset tokens stored as SHA-256 hash only; raw token delivered
   out-of-band (console in demo mode).  All sessions and refresh tokens are
   revoked on a successful password reset so that the account is fully
@@ -42,7 +43,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException
 from redis.asyncio import Redis
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
@@ -448,6 +449,17 @@ async def refresh_tokens(
         raise HTTPException(status_code=401, detail="Invalid refresh token")
 
     if token_row.revoked:
+        # SR-08: Reuse detection — bulk-revoke ALL tokens in DB first, then
+        # destroy Redis sessions. DB revocation must be committed before Redis
+        # keys are deleted so concurrent sibling-token requests are rejected at
+        # the DB layer even if Redis is briefly stale.
+        await db.execute(
+            update(RefreshToken)
+            .where(RefreshToken.user_id == token_row.user_id)
+            .values(revoked=True)
+        )
+
+        # Collect all session keys for deletion (after the UPDATE so we capture all rows).  # noqa: E501
         user_rt_result = await db.execute(
             select(RefreshToken).where(RefreshToken.user_id == token_row.user_id)
         )
@@ -456,6 +468,19 @@ async def refresh_tokens(
         if session_keys:
             await redis.delete(*session_keys)
 
+        # AuditLog first — authoritative forensic timeline (SR-16).
+        db.add(
+            AuditLog(
+                user_id=token_row.user_id,
+                action="TOKEN_REUSE_DETECTED",
+                ip_address=ip_address,
+                user_agent=user_agent,
+                details={
+                    "session_id": str(token_row.session_id),
+                    "tokens_revoked": len(all_user_tokens),
+                },
+            )
+        )
         db.add(
             SecurityEvent(
                 user_id=token_row.user_id,
@@ -583,13 +608,15 @@ async def disable_mfa(
     password: str,
     totp_code: str,
     db: AsyncSession,
+    settings: Settings,
     ip_address: str | None = None,
     user_agent: str | None = None,
 ) -> None:
     """Disable MFA for the user after verifying both password and current TOTP code.
 
-    Enforces SR-04 (TOTP gate deactivation requires confirmed identity) and
-    SR-16 (audit log on MFA_FAILED and MFA_DISABLED events).
+    Enforces SR-04 (TOTP gate deactivation requires confirmed identity), SR-05
+    (account lockout after repeated failures on this sensitive operation), and
+    SR-16 (audit log on MFA_FAILED, ACCOUNT_LOCKED, and MFA_DISABLED events).
 
     The two-factor check (password + TOTP) prevents an attacker who has only
     stolen a valid access token from silently disabling the MFA gate.  Both
@@ -606,6 +633,10 @@ async def disable_mfa(
         HTTPException 401: If the supplied TOTP code is invalid, with a
             MFA_FAILED audit log entry committed before raising.
     """
+
+    def _utcnow() -> datetime:
+        return datetime.now(timezone.utc)
+
     if not user.mfa_enabled:
         raise HTTPException(
             status_code=400,
@@ -613,6 +644,42 @@ async def disable_mfa(
         )
 
     if not verify_password(password, user.hashed_password):
+        user.failed_login_count += 1
+
+        if user.failed_login_count >= settings.max_failed_login_attempts:
+            user.locked_until = _utcnow() + timedelta(
+                minutes=settings.account_lockout_minutes
+            )
+            user.failed_login_count = 0
+            db.add(
+                SecurityEvent(
+                    user_id=user.id,
+                    event_type="ACCOUNT_LOCKED",
+                    severity=Severity.HIGH,
+                    ip_address=ip_address,
+                    details={
+                        "locked_until": user.locked_until.isoformat()
+                        if user.locked_until
+                        else None,
+                        "trigger": "disable_mfa_password_failure",
+                    },
+                )
+            )
+            db.add(
+                AuditLog(
+                    user_id=user.id,
+                    action="ACCOUNT_LOCKED",
+                    ip_address=ip_address,
+                    user_agent=user_agent,
+                    details={
+                        "locked_until": user.locked_until.isoformat()
+                        if user.locked_until
+                        else None,
+                        "trigger": "disable_mfa_password_failure",
+                    },
+                )
+            )
+
         db.add(
             AuditLog(
                 user_id=user.id,
@@ -629,6 +696,42 @@ async def disable_mfa(
         )
 
     if not verify_totp_code(user.mfa_secret, totp_code):
+        user.failed_login_count += 1
+
+        if user.failed_login_count >= settings.max_failed_login_attempts:
+            user.locked_until = _utcnow() + timedelta(
+                minutes=settings.account_lockout_minutes
+            )
+            user.failed_login_count = 0
+            db.add(
+                SecurityEvent(
+                    user_id=user.id,
+                    event_type="ACCOUNT_LOCKED",
+                    severity=Severity.HIGH,
+                    ip_address=ip_address,
+                    details={
+                        "locked_until": user.locked_until.isoformat()
+                        if user.locked_until
+                        else None,
+                        "trigger": "disable_mfa_totp_failure",
+                    },
+                )
+            )
+            db.add(
+                AuditLog(
+                    user_id=user.id,
+                    action="ACCOUNT_LOCKED",
+                    ip_address=ip_address,
+                    user_agent=user_agent,
+                    details={
+                        "locked_until": user.locked_until.isoformat()
+                        if user.locked_until
+                        else None,
+                        "trigger": "disable_mfa_totp_failure",
+                    },
+                )
+            )
+
         db.add(
             AuditLog(
                 user_id=user.id,
@@ -662,6 +765,7 @@ async def change_password(
     current_password: str,
     new_password: str,
     db: AsyncSession,
+    settings: Settings,
     ip_address: str | None = None,
     user_agent: str | None = None,
 ) -> None:
@@ -669,6 +773,9 @@ async def change_password(
 
     Verifies current_password against the stored Argon2id hash.
     Enforces SR-01 strength policy on new_password before hashing.
+    Enforces SR-05 account lockout after repeated wrong-password attempts so that
+    an attacker who has obtained a valid access token cannot brute-force the
+    current password via this endpoint without triggering a lockout.
     Writes a PASSWORD_CHANGED audit log entry on success (SR-16).
     Does not revoke existing sessions — see ADR-21.
 
@@ -676,7 +783,57 @@ async def change_password(
         HTTPException 401: If current_password does not match the stored hash.
         HTTPException 422: If new_password fails the SR-01 strength policy.
     """
+
+    def _utcnow() -> datetime:
+        return datetime.now(timezone.utc)
+
     if not verify_password(current_password, user.hashed_password):
+        user.failed_login_count += 1
+
+        if user.failed_login_count >= settings.max_failed_login_attempts:
+            user.locked_until = _utcnow() + timedelta(
+                minutes=settings.account_lockout_minutes
+            )
+            user.failed_login_count = 0
+            db.add(
+                SecurityEvent(
+                    user_id=user.id,
+                    event_type="ACCOUNT_LOCKED",
+                    severity=Severity.HIGH,
+                    ip_address=ip_address,
+                    details={
+                        "locked_until": user.locked_until.isoformat()
+                        if user.locked_until
+                        else None,
+                        "trigger": "change_password_failure",
+                    },
+                )
+            )
+            db.add(
+                AuditLog(
+                    user_id=user.id,
+                    action="ACCOUNT_LOCKED",
+                    ip_address=ip_address,
+                    user_agent=user_agent,
+                    details={
+                        "locked_until": user.locked_until.isoformat()
+                        if user.locked_until
+                        else None,
+                        "trigger": "change_password_failure",
+                    },
+                )
+            )
+
+        db.add(
+            AuditLog(
+                user_id=user.id,
+                action="PASSWORD_CHANGE_FAILED",
+                ip_address=ip_address,
+                user_agent=user_agent,
+                details={"reason": "invalid_current_password"},
+            )
+        )
+        await db.commit()
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     if not is_password_strong(new_password):
@@ -774,6 +931,10 @@ async def confirm_password_reset(
     and refresh-token revocation on password reset so the account is fully
     re-authenticated after the credential change).
 
+    Writes a PASSWORD_RESET_FAILED AuditLog entry before raising on token-validation
+    failures, and a PASSWORD_RESET_POLICY_FAILED entry before raising on
+    password-strength failure, so all failure paths produce an audit record (SR-16).
+
     Raises:
         HTTPException 400: If the token is not found or has expired.
         HTTPException 422: If new_password fails the SR-01 strength policy.
@@ -785,6 +946,16 @@ async def confirm_password_reset(
     user = result.scalar_one_or_none()
 
     if user is None:
+        db.add(
+            AuditLog(
+                user_id=None,
+                action="PASSWORD_RESET_FAILED",
+                ip_address=ip_address,
+                user_agent=user_agent,
+                details={"reason": "token_not_found"},
+            )
+        )
+        await db.commit()
         raise HTTPException(
             status_code=400,
             detail="Invalid or expired reset token",
@@ -792,6 +963,16 @@ async def confirm_password_reset(
 
     sent_at = user.password_reset_sent_at
     if sent_at is None:
+        db.add(
+            AuditLog(
+                user_id=user.id,
+                action="PASSWORD_RESET_FAILED",
+                ip_address=ip_address,
+                user_agent=user_agent,
+                details={"reason": "missing_sent_at"},
+            )
+        )
+        await db.commit()
         raise HTTPException(
             status_code=400,
             detail="Invalid or expired reset token",
@@ -802,12 +983,32 @@ async def confirm_password_reset(
 
     expiry_window = timedelta(minutes=settings.password_reset_token_ttl_minutes)
     if datetime.now(timezone.utc) > sent_at + expiry_window:
+        db.add(
+            AuditLog(
+                user_id=user.id,
+                action="PASSWORD_RESET_FAILED",
+                ip_address=ip_address,
+                user_agent=user_agent,
+                details={"reason": "token_expired"},
+            )
+        )
+        await db.commit()
         raise HTTPException(
             status_code=400,
             detail="Invalid or expired reset token",
         )
 
     if not is_password_strong(new_password):
+        db.add(
+            AuditLog(
+                user_id=user.id,
+                action="PASSWORD_RESET_POLICY_FAILED",
+                ip_address=ip_address,
+                user_agent=user_agent,
+                details={"reason": "weak_new_password"},
+            )
+        )
+        await db.commit()
         raise HTTPException(
             status_code=422,
             detail="Password does not meet strength requirements",
