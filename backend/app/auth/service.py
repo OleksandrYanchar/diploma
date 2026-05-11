@@ -47,6 +47,7 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
+from app.core.mfa_encryption import decrypt_mfa_secret, encrypt_mfa_secret
 from app.core.security import (
     create_access_token,
     create_step_up_token,
@@ -342,7 +343,11 @@ async def login(
             await db.commit()
             return None, None
 
-        if not verify_totp_code(user.mfa_secret, totp_code):
+        plaintext_secret = decrypt_mfa_secret(
+            user.mfa_secret,  # type: ignore[arg-type]
+            settings.mfa_secret_encryption_key,
+        )
+        if not verify_totp_code(plaintext_secret, totp_code):
             db.add(
                 AuditLog(
                     user_id=user.id,
@@ -695,7 +700,11 @@ async def disable_mfa(
             detail="Invalid credentials",
         )
 
-    if not verify_totp_code(user.mfa_secret, totp_code):
+    disable_mfa_plaintext = decrypt_mfa_secret(
+        user.mfa_secret,  # type: ignore[arg-type]
+        settings.mfa_secret_encryption_key,
+    )
+    if not verify_totp_code(disable_mfa_plaintext, totp_code):
         user.failed_login_count += 1
 
         if user.failed_login_count >= settings.max_failed_login_attempts:
@@ -1093,7 +1102,11 @@ async def verify_step_up(
             detail="MFA must be enabled to use step-up authentication",
         )
 
-    if not verify_totp_code(user.mfa_secret, totp_code):
+    step_up_plaintext = decrypt_mfa_secret(
+        user.mfa_secret,  # type: ignore[arg-type]
+        settings.mfa_secret_encryption_key,
+    )
+    if not verify_totp_code(step_up_plaintext, totp_code):
         db.add(
             AuditLog(
                 user_id=user.id,
@@ -1165,7 +1178,7 @@ async def setup_mfa(
         )
 
     secret = generate_totp_secret()
-    user.mfa_secret = secret
+    user.mfa_secret = encrypt_mfa_secret(secret, settings.mfa_secret_encryption_key)
 
     await db.flush()
 
@@ -1192,6 +1205,7 @@ async def enable_mfa(
     user: User,
     totp_code: str,
     db: AsyncSession,
+    settings: Settings,
     ip_address: str | None = None,
     user_agent: str | None = None,
 ) -> None:
@@ -1229,7 +1243,11 @@ async def enable_mfa(
             detail="MFA is already enabled",
         )
 
-    if not verify_totp_code(user.mfa_secret, totp_code):
+    enable_plaintext = decrypt_mfa_secret(
+        user.mfa_secret,
+        settings.mfa_secret_encryption_key,
+    )
+    if not verify_totp_code(enable_plaintext, totp_code):
         db.add(
             AuditLog(
                 user_id=user.id,

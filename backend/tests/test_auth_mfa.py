@@ -87,8 +87,16 @@ async def test_mfa_setup_persists_secret_and_does_not_enable_mfa(
     assert user is not None
     assert user.mfa_secret is not None, "mfa_secret must be set after setup"
     assert (
-        user.mfa_secret == returned_secret
-    ), "Stored secret must match the secret returned in the response"
+        user.mfa_secret != returned_secret
+    ), "Stored secret must be encrypted, not the plaintext Base32 value (SR-04)"
+    # The stored ciphertext must decrypt back to the returned plaintext.
+    from app.core.mfa_encryption import decrypt_mfa_secret
+    from tests.conftest import _TEST_SETTINGS
+
+    decrypted = decrypt_mfa_secret(
+        user.mfa_secret, _TEST_SETTINGS.mfa_secret_encryption_key
+    )
+    assert decrypted == returned_secret, "Decrypted secret must match setup response"
     assert (
         user.mfa_enabled is False
     ), "mfa_enabled must remain False until the enable step is completed"
@@ -189,8 +197,15 @@ async def test_mfa_setup_overwrites_abandoned_secret(
     user: User | None = result.scalar_one_or_none()
     assert user is not None
     assert (
-        user.mfa_secret == second_secret
-    ), "The stored secret must match the most recent setup response"
+        user.mfa_secret != second_secret
+    ), "Stored secret must be encrypted, not the plaintext Base32 value (SR-04)"
+    from app.core.mfa_encryption import decrypt_mfa_secret
+    from tests.conftest import _TEST_SETTINGS
+
+    decrypted = decrypt_mfa_secret(
+        user.mfa_secret, _TEST_SETTINGS.mfa_secret_encryption_key
+    )
+    assert decrypted == second_secret, "Latest secret must match setup secret"
     assert user.mfa_enabled is False
 
 

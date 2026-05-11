@@ -22,6 +22,7 @@ pyotp = "^2.9.0"
 qrcode = { version = "^7.4.0", extras = ["pil"] }
 Pillow = "^10.0.0"
 python-multipart = "^0.0.9"
+cryptography = "^48.0.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0.0"

@@ -13,6 +13,10 @@ os.environ.setdefault(
 )
 os.environ.setdefault("ENVIRONMENT", "test")
 os.environ.setdefault("ALLOWED_ORIGINS", "http://testserver")
+os.environ.setdefault(
+    "MFA_SECRET_ENCRYPTION_KEY",
+    "EntyHNLv7jKjCU8wCqxl5tmEdI2Zerd6lfIu9WhDgQs=",
+)
 
 from collections.abc import AsyncGenerator  # noqa: E402
 
@@ -36,6 +40,8 @@ _TEST_SETTINGS = Settings(
     database_url="postgresql+asyncpg://test:test@localhost:5432/test",  # type: ignore[arg-type]
     redis_url="redis://:testpass@localhost:6379/0",  # type: ignore[arg-type]
     jwt_secret_key="test-secret-key-that-is-at-least-32-chars-long-for-hs256",
+    # Fixed test Fernet key — NOT used in production.
+    mfa_secret_encryption_key="EntyHNLv7jKjCU8wCqxl5tmEdI2Zerd6lfIu9WhDgQs=",
     environment="test",
     debug=True,
 )

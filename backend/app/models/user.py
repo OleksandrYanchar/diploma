@@ -89,9 +89,12 @@ class User(Base):
         default=False,
     )
 
-    # Base32-encoded TOTP secret.  Null until MFA enrollment is completed.
+    # Fernet-encrypted TOTP secret.  Null until MFA enrollment is completed.
+    # The column stores the encrypted ciphertext (~140 chars); the raw Base32
+    # secret is never persisted (SR-04).  String(255) accommodates the Fernet
+    # token with room for any future key or padding changes.
     mfa_secret: Mapped[str | None] = mapped_column(
-        String(64),
+        String(255),
         nullable=True,
         default=None,
     )

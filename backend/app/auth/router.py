@@ -429,6 +429,7 @@ async def mfa_enable(
     current_user: User = Depends(get_current_user),
     _verified: None = Depends(require_verified),
     db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
 ) -> dict[str, str]:
     """Verify the first TOTP code and activate MFA on the authenticated account.
 
@@ -467,6 +468,7 @@ async def mfa_enable(
         user=current_user,
         totp_code=body.totp_code,
         db=db,
+        settings=settings,
         ip_address=ip_address,
         user_agent=user_agent,
     )

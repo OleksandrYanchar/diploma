@@ -32,12 +32,11 @@ Every TD entry uses the same schema:
 
 ---
 
-# Section A — Must-fix before Phase 7 merge
+# Section A — Fixed in pre-Phase 8 audit (`fix/pre-defense-security-gaps`, PR #10)
 
-These items are **not** acceptable as deferred technical debt. They must be
-addressed before the Phase 7 branch merges to `main`. They are listed here only
-so the reader has a single source of truth for outstanding work; once fixed,
-each entry must be moved to the relevant ADR / closed item, not silently deleted.
+These items were originally must-fix blockers before the Phase 7 merge. All
+three were resolved in a dedicated pre-Phase 8 audit pass (`fix/pre-defense-security-gaps`,
+merged as PR #10). Status fields below reflect the current fixed state.
 
 ---
 
@@ -46,7 +45,7 @@ each entry must be moved to the relevant ADR / closed item, not silently deleted
 **Related audit finding:** AUDIT-03, AUDIT-19
 **Severity:** High
 **Type:** Security gap / Documentation accuracy
-**Status:** Open — must fix before Phase 7 merge
+**Status:** Fixed — `fix/pre-defense-security-gaps` (PR #10)
 
 ### Current state
 
@@ -92,7 +91,7 @@ thesis claim of a coherent admin governance model.
 **Related audit finding:** AUDIT-05
 **Severity:** High
 **Type:** Security gap / Architecture
-**Status:** Open — must fix before Phase 7 merge
+**Status:** Fixed — `fix/pre-defense-security-gaps` (PR #10)
 
 ### Current state
 
@@ -147,7 +146,7 @@ Must fix before Phase 7 merge.
 **Related audit finding:** AUDIT-21 (subset)
 **Severity:** Medium
 **Type:** Test coverage
-**Status:** Open — must fix before Phase 7 merge
+**Status:** Fixed — `fix/pre-defense-security-gaps` (PR #10)
 
 ### Current state
 
@@ -192,7 +191,7 @@ defence demo. Each is small enough to be a self-contained change.
 **Related audit finding:** AUDIT-01
 **Severity:** Critical (financial-integrity defect)
 **Type:** Security gap / Concurrency
-**Status:** Open — should fix before final demo
+**Status:** Fixed — `fix/pre-defense-security-gaps` (PR #10)
 
 ### Current state
 
@@ -272,7 +271,7 @@ Should fix before final thesis demo.
 **Related audit finding:** AUDIT-04
 **Severity:** High
 **Type:** Security gap
-**Status:** Open — should fix before final demo
+**Status:** Fixed — `fix/pre-defense-security-gaps` (PR #10)
 
 ### Current state
 
@@ -390,7 +389,7 @@ Should fix before final thesis demo. The thesis is on Zero Trust;
 **Related audit finding:** AUDIT-10
 **Severity:** Medium
 **Type:** Security gap / Phase 8 work
-**Status:** Open — Phase 8 deliverable
+**Status:** Fixed — Phase 8 (sliding-window middleware, configurable via `RATE_LIMIT_*` env vars)
 
 ### Current state
 
@@ -427,7 +426,7 @@ Should fix before final thesis demo. Already planned as Phase 8.
 **Related audit finding:** AUDIT-11
 **Severity:** Medium
 **Type:** Abuse scenario
-**Status:** Open — should fix before final demo
+**Status:** Fixed — `fix/pre-defense-security-gaps` (PR #10)
 
 ### Current state
 
@@ -462,7 +461,7 @@ Should fix before final thesis demo.
 **Related audit finding:** AUDIT-09
 **Severity:** Medium
 **Type:** Security gap (audit completeness)
-**Status:** Open — should fix before final demo
+**Status:** Fixed — `fix/pre-defense-security-gaps` (PR #10)
 
 ### Current state
 
@@ -493,7 +492,7 @@ Should fix before final thesis demo.
 **Related audit finding:** AUDIT-22
 **Severity:** Low / Medium
 **Type:** Security gap (audit completeness)
-**Status:** Open — should fix before final demo
+**Status:** Fixed — `fix/pre-defense-security-gaps` (PR #10)
 
 ### Current state
 
@@ -902,7 +901,7 @@ but must be corrected so the docs do not misrepresent the implementation.
 **Related audit finding:** AUDIT-20
 **Severity:** Low
 **Type:** Documentation
-**Status:** Open — fix on next docs pass
+**Status:** Fixed — Phase 9 docs sync (this pass)
 
 ### Current state
 
@@ -922,11 +921,13 @@ Update the plan to reflect:
 
 - Phase 7 = Admin API (read-only + mutating).
 - Phase 8 = Rate Limiting middleware.
-- Phase 9 = Frontend demo (was Phase 8 in the original plan).
+- Phase 9 = Frontend demo + TOTP encryption at rest (TD-09).
 
 ### MVP decision
 
-Documentation-only. Bundle into the next docs pass.
+Fixed. `IMPLEMENTATION_PLAN.md` now reflects the three-phase split above. Phase
+numbering in the Summary table and section headers is correct as of the Phase 9
+docs sync.
 
 ---
 

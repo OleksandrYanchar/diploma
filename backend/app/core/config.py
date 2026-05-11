@@ -131,6 +131,17 @@ class Settings(BaseSettings):
     )
     jwt_algorithm: str = Field(default="HS256", description="JWT signing algorithm.")
 
+    # MFA secret encryption key (SR-04: TOTP secrets stored encrypted at rest)
+    mfa_secret_encryption_key: str = Field(
+        description=(
+            "Fernet key for encrypting TOTP secrets at rest (SR-04).  "
+            "Must be a 44-character URL-safe base64-encoded 32-byte key.  "
+            "Generate with: python -c "
+            '"from cryptography.fernet import Fernet; '
+            'print(Fernet.generate_key().decode())"'
+        )
+    )
+
     # Access token lifetime (SR-06: maximum 15 minutes)
     access_token_expire_minutes: int = Field(
         default=15,
@@ -297,6 +308,24 @@ class Settings(BaseSettings):
         """
         if len(value) < 32:
             msg = "jwt_secret_key must be at least 32 characters long."
+            raise ValueError(msg)
+        return value
+
+    @field_validator("mfa_secret_encryption_key")
+    @classmethod
+    def mfa_key_must_be_valid_fernet(cls, value: str) -> str:
+        """Reject MFA encryption keys that are not the correct Fernet key length.
+
+        A valid Fernet key is exactly 44 characters (32 bytes of random data
+        encoded as URL-safe base64 with padding).
+        """
+        if len(value) != 44:
+            msg = (
+                "mfa_secret_encryption_key must be a 44-character Fernet key.  "
+                "Generate with: python -c "
+                '"from cryptography.fernet import Fernet; '
+                'print(Fernet.generate_key().decode())"'
+            )
             raise ValueError(msg)
         return value
 
