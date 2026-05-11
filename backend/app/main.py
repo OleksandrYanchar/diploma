@@ -19,7 +19,8 @@ from app.admin.router import router as admin_router
 from app.auth.router import router as auth_router
 from app.core.config import Settings, get_settings
 from app.core.database import close_db, init_db
-from app.core.redis import close_redis, init_redis
+from app.core.middleware import RateLimitMiddleware
+from app.core.redis import close_redis, get_redis, init_redis
 from app.routers.health import router as health_router
 from app.transactions.router import router as transactions_router
 from app.users.router import router as users_router
@@ -37,6 +38,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Startup
     init_db(str(settings.database_url))
     init_redis(str(settings.redis_url))
+
+    app.state.settings = settings
+    app.state.redis = get_redis()
 
     yield
 
@@ -69,6 +73,20 @@ def create_application() -> FastAPI:
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
         allow_headers=["Authorization", "Content-Type", "X-Step-Up-Token"],
     )
+
+    # SR-15: sliding window per-IP rate limiting on unauthenticated auth endpoints.
+    # Middleware is applied in LIFO order in Starlette, so this runs before CORS.
+    # Values are Settings attribute names; the middleware reads actual limits from
+    # request.app.state.settings per request so test fixtures can override them.
+    _rate_limit_rules: dict[tuple[str, str], str] = {
+        ("POST", "/api/v1/auth/login"): "rate_limit_login_max",
+        ("POST", "/api/v1/auth/refresh"): "rate_limit_refresh_max",
+        ("POST", "/api/v1/auth/register"): "rate_limit_register_max",
+        ("POST", "/api/v1/auth/password/reset/request"): (
+            "rate_limit_password_reset_max"
+        ),
+    }
+    application.add_middleware(RateLimitMiddleware, rules=_rate_limit_rules)
 
     application.include_router(health_router, prefix="/api/v1")
     application.include_router(auth_router, prefix="/api/v1")

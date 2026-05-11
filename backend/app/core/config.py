@@ -195,6 +195,39 @@ class Settings(BaseSettings):
         ),
     )
 
+    # SR-15: application-layer rate limiting
+    # Shared sliding window duration for all rate-limited endpoints.
+    rate_limit_window_seconds: int = Field(
+        default=60,
+        ge=1,
+        description=(
+            "Sliding window duration in seconds for per-IP rate limiting (SR-15)."
+        ),
+    )
+    # Per-endpoint request caps within the window.
+    rate_limit_login_max: int = Field(
+        default=10,
+        ge=1,
+        description="Max POST /auth/login requests per IP per window (SR-15).",
+    )
+    rate_limit_refresh_max: int = Field(
+        default=30,
+        ge=1,
+        description="Max POST /auth/refresh requests per IP per window (SR-15).",
+    )
+    rate_limit_register_max: int = Field(
+        default=5,
+        ge=1,
+        description="Max POST /auth/register requests per IP per window (SR-15).",
+    )
+    rate_limit_password_reset_max: int = Field(
+        default=5,
+        ge=1,
+        description=(
+            "Max POST /auth/password/reset/request requests per IP per window (SR-15)."
+        ),
+    )
+
     # CORS
     allowed_origins: list[str] = Field(
         default=["http://localhost:3000"],
