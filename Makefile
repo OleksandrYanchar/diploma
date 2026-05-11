@@ -7,8 +7,12 @@
 # docker-compose.test.yml → test stack (backend :8000, postgres-test :5434, tmpfs)
 # ──────────────────────────────────────────────────────────────────────────────
 
+ENV_FILE      ?= .env
+TEST_ENV_FILE ?= .env.test
+
 COMPOSE      := docker compose
-COMPOSE_TEST := docker compose -p diploma-test -f docker-compose.test.yml
+COMPOSE_TEST := docker compose -p diploma-test -f docker-compose.test.yml \
+                --env-file $(TEST_ENV_FILE)
 
 BACKEND      := diploma-backend-1
 BACKEND_TEST := diploma-test-backend-1

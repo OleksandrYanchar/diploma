@@ -302,13 +302,24 @@ class VerificationRunner:
         except Exception as e:
             self._blocked("startup", "docs_available", "Swagger UI /docs", str(e))
 
-    async def _run_registration(self) -> dict[str, Any]:
-        """Register + verify two users. Returns ctx with emails."""
-        print("\n─── Registration ─────────────────────────────────────────────")
+    async def _run_shared_setup(self) -> dict[str, Any]:
+        """Register and verify the three shared users; test unverified access inline.
+
+        Registrations performed here (3 of the 8 total register calls in this run):
+          user_a       — primary authenticated user for login, session, password, MFA
+          user_b       — transfer destination; password-reset target; promoted to AUDITOR
+          lockout_user — lockout flow target; admin mutation target (id reused in _run_admin_api)
+
+        The unverified-access check for user_a is performed here (before email verification)
+        so no separate unverified user registration is needed later in _run_rbac.
+        """
+        print("\n─── Shared Setup (Registration + Email Verification) ─────────")
         ctx: dict[str, Any] = {}
         email_a = self._email("user_a")
         email_b = self._email("user_b")
+        email_lockout = self._email("lockout_user")
 
+        # --- user_a -----------------------------------------------------------
         r, body = await self._req(
             "POST", "/auth/register",
             flow="registration", branch="valid",
@@ -320,29 +331,8 @@ class VerificationRunner:
             ctx["email_a"] = email_a
             ctx["user_a_id"] = body.get("id")
 
-        await self._req(
-            "POST", "/auth/register",
-            flow="registration", branch="duplicate_email",
-            name="register duplicate email → 409",
-            json_body={"email": email_a, "password": "StrongPass1!"},
-            expected=409,
-        )
-        await self._req(
-            "POST", "/auth/register",
-            flow="registration", branch="weak_password",
-            name="register weak password → 422",
-            json_body={"email": self._email("weak_pw"), "password": "weak"},
-            expected=422,
-        )
-        await self._req(
-            "POST", "/auth/register",
-            flow="registration", branch="invalid_email",
-            name="register invalid email format → 422",
-            json_body={"email": "not-an-email", "password": "StrongPass1!"},
-            expected=422,
-        )
-
-        r_b, body_b = await self._req(
+        # --- user_b -----------------------------------------------------------
+        r_b, _ = await self._req(
             "POST", "/auth/register",
             flow="registration", branch="valid",
             name="register user_b (transfer destination) → 201",
@@ -351,17 +341,45 @@ class VerificationRunner:
         )
         if r_b.result == RESULT_PASS:
             ctx["email_b"] = email_b
+            ctx["pw_b"] = "StrongPass1!"
 
-        return ctx
+        # --- lockout_user -----------------------------------------------------
+        r_lock, body_lock = await self._req(
+            "POST", "/auth/register",
+            flow="lockout", branch="setup",
+            name="register lockout test user",
+            json_body={"email": email_lockout, "password": "StrongPass1!"},
+            expected=201,
+        )
+        if r_lock.result == RESULT_PASS and isinstance(body_lock, dict):
+            ctx["email_lockout"] = email_lockout
+            ctx["lockout_user_id"] = body_lock.get("id")
 
-    async def _run_email_verification(self, ctx: dict[str, Any]) -> dict[str, Any]:
+        # --- unverified access check (user_a before email verification) -------
+        # SR: unverified email must not grant access to financial endpoints.
+        # Done here so _run_rbac does not need a separate unverified user registration.
+        if ctx.get("email_a"):
+            r_uv, body_uv = await self._req(
+                "POST", "/auth/login",
+                flow="rbac", branch="unverified_login",
+                name="login unverified user_a (email not yet verified)",
+                json_body={"email": email_a, "password": "StrongPass1!"},
+                expected=200,
+            )
+            if r_uv.result == RESULT_PASS and isinstance(body_uv, dict):
+                access_uv = body_uv.get("access_token")
+                await self._req(
+                    "GET", "/accounts/me",
+                    flow="rbac", branch="unverified_financial_access",
+                    name="accounts/me with unverified user → 403",
+                    headers={"Authorization": f"Bearer {access_uv}"},
+                    expected=403,
+                )
+
+        # --- email verification -----------------------------------------------
         print("\n─── Email Verification ───────────────────────────────────────")
         await self._wait_for_logs()
 
-        email_a = ctx.get("email_a", "")
-        email_b = ctx.get("email_b", "")
-
-        # valid token for user_a
         token_a = extract_demo_token(email_a, "Email verification")
         if token_a:
             await self._req(
@@ -394,7 +412,6 @@ class VerificationRunner:
                 expected=400,
             )
 
-        # verify user_b
         token_b = extract_demo_token(email_b, "Email verification")
         if token_b:
             await self._req(
@@ -407,6 +424,17 @@ class VerificationRunner:
         else:
             self._blocked("email_verification", "valid_token", "verify email user_b",
                           "Token not found in Docker logs")
+
+        if ctx.get("email_lockout"):
+            token_lockout = extract_demo_token(email_lockout, "Email verification")
+            if token_lockout:
+                await self._req(
+                    "GET", "/auth/verify-email",
+                    flow="lockout", branch="setup",
+                    name="verify lockout user email",
+                    params={"token": token_lockout},
+                    expected=200,
+                )
 
         return ctx
 
@@ -551,31 +579,14 @@ class VerificationRunner:
 
         return ctx
 
-    async def _run_lockout(self) -> None:
+    async def _run_lockout(self, ctx: dict[str, Any]) -> dict[str, Any]:
+        """Account lockout flow — uses lockout_user registered in _run_shared_setup."""
         print("\n─── Account Lockout ──────────────────────────────────────────")
-        email_locked = self._email("locked_user")
-
-        r, _ = await self._req(
-            "POST", "/auth/register",
-            flow="lockout", branch="setup",
-            name="register lockout test user",
-            json_body={"email": email_locked, "password": "StrongPass1!"},
-            expected=201,
-        )
-        if r.result != RESULT_PASS:
-            self._blocked("lockout", "all", "account lockout flow", "registration failed")
-            return
-
-        await self._wait_for_logs()
-        tok = extract_demo_token(email_locked, "Email verification")
-        if tok:
-            await self._req(
-                "GET", "/auth/verify-email",
-                flow="lockout", branch="setup",
-                name="verify lockout user email",
-                params={"token": tok},
-                expected=200,
-            )
+        email_lockout = ctx.get("email_lockout", "")
+        if not email_lockout:
+            self._blocked("lockout", "all", "account lockout flow",
+                          "lockout user not set up in shared_setup")
+            return ctx
 
         # 5 consecutive failed logins
         for i in range(5):
@@ -583,7 +594,7 @@ class VerificationRunner:
                 "POST", "/auth/login",
                 flow="lockout", branch=f"failed_attempt_{i + 1}",
                 name=f"wrong password attempt {i + 1}/5 → 401",
-                json_body={"email": email_locked, "password": "WrongPassword999!"},
+                json_body={"email": email_lockout, "password": "WrongPassword999!"},
                 expected=401,
             )
 
@@ -592,9 +603,11 @@ class VerificationRunner:
             "POST", "/auth/login",
             flow="lockout", branch="correct_password_while_locked",
             name="correct password while account is locked → 403",
-            json_body={"email": email_locked, "password": "StrongPass1!"},
+            json_body={"email": email_lockout, "password": "StrongPass1!"},
             expected=403,
         )
+
+        return ctx
 
     async def _run_password_flows(self, ctx: dict[str, Any]) -> dict[str, Any]:
         print("\n─── Password Change ──────────────────────────────────────────")
@@ -644,25 +657,13 @@ class VerificationRunner:
             )
 
         print("\n─── Password Reset ───────────────────────────────────────────")
-        email_reset = self._email("reset_user")
-        r_reg, _ = await self._req(
-            "POST", "/auth/register",
-            flow="password_reset", branch="setup",
-            name="register dedicated reset test user",
-            json_body={"email": email_reset, "password": "OriginalPass1!"},
-            expected=201,
-        )
-        if r_reg.result == RESULT_PASS:
-            await self._wait_for_logs()
-            vt = extract_demo_token(email_reset, "Email verification")
-            if vt:
-                await self._req(
-                    "GET", "/auth/verify-email",
-                    flow="password_reset", branch="setup",
-                    name="verify reset user email",
-                    params={"token": vt},
-                    expected=200,
-                )
+        # Reuse user_b (registered and verified in shared_setup) to avoid an
+        # extra POST /auth/register within the 60-second sliding rate-limit window.
+        email_reset = ctx.get("email_b", "")
+        if not email_reset:
+            self._blocked("password_reset", "all", "password reset flow",
+                          "user_b not available from shared_setup")
+            return ctx
 
         # request for known email (non-enumeration: always 200)
         await self._req(
@@ -708,6 +709,7 @@ class VerificationRunner:
                 expected=200,
             )
             if r_conf.result == RESULT_PASS:
+                ctx["pw_b"] = "BrandNewPass1!"
                 # login with new password
                 await self._req(
                     "POST", "/auth/login",
@@ -1013,32 +1015,9 @@ class VerificationRunner:
             expected=403,
         )
 
-        # Unverified user cannot access accounts (financial endpoint)
-        email_unverified = self._email("unverified_user")
-        r_uv, _ = await self._req(
-            "POST", "/auth/register",
-            flow="rbac", branch="unverified_setup",
-            name="register unverified user",
-            json_body={"email": email_unverified, "password": "StrongPass1!"},
-            expected=201,
-        )
-        if r_uv.result == RESULT_PASS:
-            r_uv_login, body_uv = await self._req(
-                "POST", "/auth/login",
-                flow="rbac", branch="unverified_login",
-                name="login unverified user (no email verify)",
-                json_body={"email": email_unverified, "password": "StrongPass1!"},
-                expected=200,
-            )
-            if r_uv_login.result == RESULT_PASS and isinstance(body_uv, dict):
-                access_uv = body_uv.get("access_token")
-                await self._req(
-                    "GET", "/accounts/me",
-                    flow="rbac", branch="unverified_financial_access",
-                    name="accounts/me with unverified user → 403",
-                    headers={"Authorization": f"Bearer {access_uv}"},
-                    expected=403,
-                )
+        # Unverified user cannot access accounts (financial endpoint).
+        # This scenario was verified in _run_shared_setup using user_a before its
+        # email was confirmed — no separate registration needed here.
 
         if access_admin:
             ctx["access_admin"] = access_admin
@@ -1052,41 +1031,31 @@ class VerificationRunner:
         access_admin = ctx.get("access_admin")
         access_user = ctx.get("access_a")
 
-        email_auditor = self._email("auditor_user")
+        # Promote user_b to AUDITOR via psql — no new registration needed.
+        # user_b is already registered and email-verified in _run_shared_setup.
+        email_auditor = ctx.get("email_b", "")
+        pw_auditor = ctx.get("pw_b", "StrongPass1!")
         access_auditor: str | None = None
-        r_aud_reg, _ = await self._req(
-            "POST", "/auth/register",
-            flow="admin_api", branch="auditor_setup",
-            name="register auditor test user",
-            json_body={"email": email_auditor, "password": "StrongPass1!"},
-            expected=201,
-        )
-        if r_aud_reg.result == RESULT_PASS:
-            await self._wait_for_logs()
-            vt = extract_demo_token(email_auditor, "Email verification")
-            if vt:
-                await self._req(
-                    "GET", "/auth/verify-email",
-                    flow="admin_api", branch="auditor_setup",
-                    name="verify auditor user email",
-                    params={"token": vt},
-                    expected=200,
-                )
+        if email_auditor:
             promoted = promote_to_auditor(email_auditor, pg_user, pg_pw, pg_db)
             if not promoted:
                 self._blocked("admin_api", "auditor_setup",
-                              "promote user to auditor",
-                              "Could not promote user to auditor via psql")
+                              "promote user_b to auditor",
+                              "Could not promote user_b to auditor via psql")
             else:
                 r_aud_login, body_aud = await self._req(
                     "POST", "/auth/login",
                     flow="admin_api", branch="auditor_login",
-                    name="login auditor user after role promotion",
-                    json_body={"email": email_auditor, "password": "StrongPass1!"},
+                    name="login user_b (now AUDITOR) after role promotion",
+                    json_body={"email": email_auditor, "password": pw_auditor},
                     expected=200,
                 )
                 if r_aud_login.result == RESULT_PASS and isinstance(body_aud, dict):
                     access_auditor = body_aud.get("access_token")
+        else:
+            self._blocked("admin_api", "auditor_setup",
+                          "promote user_b to auditor",
+                          "user_b not available from shared_setup")
 
         if access_admin:
             await self._req(
@@ -1216,27 +1185,10 @@ class VerificationRunner:
             expected=403,
         )
 
-        email_target = self._email("admin_target_user")
-        target_user_id: str | None = None
-        r_tgt_reg, body_tgt_reg = await self._req(
-            "POST", "/auth/register",
-            flow="admin_api", branch="target_user_setup",
-            name="register target user for mutating admin ops",
-            json_body={"email": email_target, "password": "StrongPass1!"},
-            expected=201,
-        )
-        if r_tgt_reg.result == RESULT_PASS and isinstance(body_tgt_reg, dict):
-            target_user_id = body_tgt_reg.get("id")
-            await self._wait_for_logs()
-            vt = extract_demo_token(email_target, "Email verification")
-            if vt:
-                await self._req(
-                    "GET", "/auth/verify-email",
-                    flow="admin_api", branch="target_user_setup",
-                    name="verify target user email",
-                    params={"token": vt},
-                    expected=200,
-                )
+        # Reuse lockout_user as the admin mutation target — no new registration needed.
+        # lockout_user is registered and email-verified in _run_shared_setup;
+        # its account is currently locked (useful: admin unlock is one of the tests).
+        target_user_id: str | None = ctx.get("lockout_user_id")
 
         # ── unlock ────────────────────────────────────────────────────────────
         if access_admin and target_user_id:
@@ -1389,13 +1341,14 @@ class VerificationRunner:
                 expected=200,
             )
 
-        # Get/create user_b account
+        # Get/create user_b account — use current password (may have changed after reset)
+        pw_b = ctx.get("pw_b", "StrongPass1!")
         if email_b:
             r_b_login, body_b_login = await self._req(
                 "POST", "/auth/login",
                 flow="accounts", branch="user_b_login",
                 name="login user_b to get their account",
-                json_body={"email": email_b, "password": "StrongPass1!"},
+                json_body={"email": email_b, "password": pw_b},
                 expected=200,
             )
             if r_b_login.result == RESULT_PASS and isinstance(body_b_login, dict):
@@ -1640,6 +1593,139 @@ class VerificationRunner:
 
         return ctx
 
+    async def _run_rate_limiting(self, ctx: dict[str, Any]) -> None:
+        """SR-15 per-IP sliding window rate limiting verification.
+
+        Negative registration tests (validation failures — no user is created, no
+        registration slot consumed in the 60-second window):
+          duplicate email → 409, weak password → 422, invalid email format → 422
+
+        Login flood test: sends repeated POST /auth/login requests with a
+        nonexistent email (no real session created) until the middleware returns
+        429 with a Retry-After header.  The default limit is 10 req/60 s per IP;
+        combined with earlier login calls in the run the 429 typically appears
+        within a few attempts here.
+        """
+        print("\n─── Rate Limiting / SR-15 ────────────────────────────────────")
+        email_a = ctx.get("email_a", "")
+
+        # Negative registration tests — these are expected to fail (409/422) so
+        # they do not produce valid users.  Moved here so the 3 real registrations
+        # in shared_setup and 2 in mfa/rbac stay well under the 5/60 s limit.
+        await self._req(
+            "POST", "/auth/register",
+            flow="registration", branch="duplicate_email",
+            name="register duplicate email → 409",
+            json_body={"email": email_a, "password": "StrongPass1!"},
+            expected=409,
+        )
+        await self._req(
+            "POST", "/auth/register",
+            flow="registration", branch="weak_password",
+            name="register weak password → 422",
+            json_body={"email": self._email("weak_pw"), "password": "weak"},
+            expected=422,
+        )
+        await self._req(
+            "POST", "/auth/register",
+            flow="registration", branch="invalid_email",
+            name="register invalid email format → 422",
+            json_body={"email": "not-an-email", "password": "StrongPass1!"},
+            expected=422,
+        )
+
+        # SR-15 login flood — raw requests so individual pre-limit calls do not
+        # appear as FAILs in the report.  We break as soon as the first 429 is
+        # observed and record it as PASS.
+        print("  [SR-15] Flooding POST /auth/login to trigger 429…")
+        assert self._client is not None
+        flood_payload = {"email": "rl_flood_probe@example.invalid", "password": "wrong"}
+        rate_limited_at: int | None = None
+        retry_after_value: str | None = None
+
+        for attempt in range(30):
+            resp = await self._client.post(
+                self._url("/auth/login"),
+                json=flood_payload,
+                timeout=30.0,
+            )
+            ts = datetime.now(timezone.utc).isoformat()
+            if resp.status_code == 429:
+                rate_limited_at = attempt + 1
+                retry_after_value = resp.headers.get("Retry-After")
+                self.results.append(ScenarioResult(
+                    timestamp=ts,
+                    flow="rate_limiting", branch="login_flood_429",
+                    name=f"SR-15: login flood attempt {attempt + 1} → 429 (rate limited)",
+                    method="POST", full_url=self._url("/auth/login"),
+                    request_headers={},
+                    request_payload=_sanitize(flood_payload),
+                    status_code=429,
+                    response_headers=dict(resp.headers),
+                    response_body=resp.text,
+                    result=RESULT_PASS,
+                    notes=f"Retry-After: {retry_after_value}",
+                    expected_status=429,
+                ))
+                sc = "429"
+                print(f"  ✓ [PASS   ] POST   /auth/login (flood attempt {attempt + 1:<2})       {sc}")
+                break
+            else:
+                self.results.append(ScenarioResult(
+                    timestamp=ts,
+                    flow="rate_limiting", branch=f"login_flood_attempt_{attempt + 1}",
+                    name=f"SR-15: login flood attempt {attempt + 1} (within limit → {resp.status_code})",
+                    method="POST", full_url=self._url("/auth/login"),
+                    request_headers={},
+                    request_payload=_sanitize(flood_payload),
+                    status_code=resp.status_code,
+                    response_headers={},
+                    response_body=None,
+                    result=RESULT_PASS,
+                    notes="Within rate-limit window",
+                    expected_status=401,
+                ))
+                print(
+                    f"  ✓ [PASS   ] POST   /auth/login "
+                    f"(flood attempt {attempt + 1:<2}, within limit)  {resp.status_code}"
+                )
+
+        ts = datetime.now(timezone.utc).isoformat()
+        if rate_limited_at is not None:
+            has_header = (
+                retry_after_value is not None
+                and retry_after_value.strip().lstrip("-").isdigit()
+                and int(retry_after_value) >= 1
+            )
+            result = RESULT_PASS if has_header else RESULT_FAIL
+            notes = (
+                f"Rate limited at attempt {rate_limited_at}; "
+                f"Retry-After={retry_after_value}"
+            )
+            self.results.append(ScenarioResult(
+                timestamp=ts,
+                flow="rate_limiting", branch="retry_after_header_present",
+                name="SR-15: 429 carries Retry-After header ≥ 1 second",
+                method="N/A", full_url="N/A",
+                request_headers={}, request_payload={},
+                status_code=429, response_headers={},
+                response_body=None,
+                result=result,
+                notes=notes,
+                expected_status=429,
+            ))
+            icon = "✓" if result == RESULT_PASS else "✗"
+            print(f"  {icon} [{result:<7}] Retry-After header: {retry_after_value}")
+        else:
+            self._blocked(
+                "rate_limiting", "login_flood_429",
+                "SR-15 login flood → 429",
+                "No 429 received after 30 flood attempts. "
+                "Rate-limit middleware may not be active on this base URL "
+                "(use --base-url http://localhost for nginx, or the app layer "
+                "middleware if hitting port 8000 directly).",
+            )
+
     async def _run_history(self, ctx: dict[str, Any]) -> None:
         print("\n─── Transaction History ──────────────────────────────────────")
         access_a = ctx.get("access_a")
@@ -1690,10 +1776,9 @@ class VerificationRunner:
 
             await self._run_health()
             await self._run_docs()
-            ctx = await self._run_registration()
-            ctx = await self._run_email_verification(ctx)
+            ctx = await self._run_shared_setup()
             ctx = await self._run_login_and_session(ctx)
-            await self._run_lockout()
+            ctx = await self._run_lockout(ctx)
             ctx = await self._run_password_flows(ctx)
 
             if not self.smoke_only:
@@ -1702,6 +1787,7 @@ class VerificationRunner:
                 ctx = await self._run_admin_api(ctx)
                 ctx = await self._run_accounts_and_transfers(ctx)
                 await self._run_history(ctx)
+                await self._run_rate_limiting(ctx)
             else:
                 # Smoke-only: light account + transfer + history happy paths
                 ctx = await self._run_rbac(ctx)

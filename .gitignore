@@ -277,3 +277,5 @@ pyrightconfig.json
 backend/.claude/
 *.sqlite
 artifacts/
+.env.test
+.env.test
