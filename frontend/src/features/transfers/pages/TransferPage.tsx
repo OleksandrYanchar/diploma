@@ -83,7 +83,22 @@ export function TransferPage(): React.ReactElement {
         />
       )}
 
-      <div className="max-w-lg">
+      <div className="max-w-lg space-y-4">
+        {/* MFA status indicator — always visible, not conditioned on amount. */}
+        {user?.mfa_enabled ? (
+          <Alert
+            type="success"
+            message="Step-up authentication is active. High-value transfers ($1000+) will require TOTP confirmation."
+            data-testid="mfa-active-notice"
+          />
+        ) : (
+          <Alert
+            type="error"
+            message="High-value transfers ($1000+) require MFA. Enable MFA in your profile before sending large transfers."
+            data-testid="mfa-required-notice"
+          />
+        )}
+
         <Card title="Send Transfer">
           {successTx && (
             <Alert

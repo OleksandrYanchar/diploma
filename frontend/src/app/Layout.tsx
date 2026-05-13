@@ -1,7 +1,6 @@
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "@/lib/auth";
-import { apiClient } from "@/shared/api/client";
-import { getRefreshToken } from "@/shared/api/client";
+import { apiClient, getRefreshToken } from "@/shared/api/client";
 
 interface NavLinkProps {
   to: string;
@@ -22,7 +21,7 @@ function NavLink({ to, testId, children }: NavLinkProps): React.ReactElement {
 }
 
 export function Layout({ children }: { children: React.ReactNode }): React.ReactElement {
-  const { user, logout } = useAuth();
+  const { user, logout, rateLimitMessage, clearRateLimitMessage } = useAuth();
   const navigate = useNavigate();
 
   async function handleLogout(): Promise<void> {
@@ -81,12 +80,28 @@ export function Layout({ children }: { children: React.ReactNode }): React.React
                 data-testid="nav-logout"
                 className="text-gray-300 hover:text-white text-sm font-medium transition-colors"
               >
-                Logout
+                Sign out
               </button>
             </div>
           </div>
         </div>
       </nav>
+
+      {/* Rate-limit banner: shown when the silent token refresh received 429. */}
+      {rateLimitMessage && (
+        <div
+          className="bg-yellow-400 text-yellow-900 text-sm text-center py-2 px-4 flex items-center justify-center gap-4"
+          data-testid="rate-limit-banner"
+        >
+          <span>{rateLimitMessage}</span>
+          <button
+            onClick={clearRateLimitMessage}
+            className="underline font-semibold text-yellow-900 hover:text-yellow-700"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
 
       {/* Unverified user banner */}
       {user && !user.is_verified && (

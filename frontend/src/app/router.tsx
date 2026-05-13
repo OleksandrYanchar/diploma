@@ -16,6 +16,9 @@ import { MfaEnablePage } from "@/features/mfa/pages/MfaEnablePage";
 import { MfaDisablePage } from "@/features/mfa/pages/MfaDisablePage";
 import { MfaLoginPage } from "@/features/mfa/pages/MfaLoginPage";
 
+// Dashboard
+import { DashboardPage } from "@/features/dashboard/pages/DashboardPage";
+
 // Account / transfer / history
 import { AccountPage } from "@/features/accounts/pages/AccountPage";
 import { TransferPage } from "@/features/transfers/pages/TransferPage";
@@ -75,7 +78,7 @@ function AppRoutes(): React.ReactElement {
         path="/dashboard"
         element={
           <ProtectedRoute>
-            <AccountPage />
+            <DashboardPage />
           </ProtectedRoute>
         }
       />

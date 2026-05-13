@@ -15,7 +15,7 @@ import { Card } from "@/shared/ui/Card";
 import { extractErrorMessage } from "@/shared/api/errors";
 
 export function LoginPage(): React.ReactElement {
-  const { login: authLogin } = useAuth();
+  const { login: authLogin, sessionExpired, rateLimitMessage, clearRateLimitMessage } = useAuth();
   const navigate = useNavigate();
   const [serverError, setServerError] = useState<string | null>(null);
 
@@ -58,6 +58,29 @@ export function LoginPage(): React.ReactElement {
             onSubmit={(e) => void handleSubmit(onSubmit)(e)}
             className="space-y-4"
           >
+            {sessionExpired && (
+              <Alert
+                type="warning"
+                message="Your session has expired. Please sign in again."
+                data-testid="session-expired-banner"
+              />
+            )}
+            {rateLimitMessage && (
+              <Alert
+                type="warning"
+                message={rateLimitMessage}
+                data-testid="rate-limit-banner"
+              />
+            )}
+            {rateLimitMessage && (
+              <button
+                type="button"
+                onClick={clearRateLimitMessage}
+                className="text-xs text-gray-400 underline"
+              >
+                Dismiss
+              </button>
+            )}
             {serverError && <Alert type="error" message={serverError} />}
             <Input
               label="Email"
