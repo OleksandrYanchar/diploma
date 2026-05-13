@@ -2,9 +2,8 @@
  * DashboardPage — authenticated user overview.
  *
  * Shows:
- *  - User identity (email, role)
  *  - Account balance summary (read-only, no edit controls)
- *  - MFA status with a link to enable/disable
+ *  - MFA / security status with a link to enable/disable
  *  - Quick-action links: send transfer, view history, manage account
  *
  * This is distinct from /accounts which shows the full account detail view
@@ -34,30 +33,9 @@ export function DashboardPage(): React.ReactElement {
 
   return (
     <div className="space-y-6">
-      {/* Identity summary */}
-      <Card title="Welcome">
-        <div className="flex items-center justify-between">
-          <div>
-            <p className="text-sm text-gray-500">Signed in as</p>
-            <p
-              className="text-lg font-semibold text-gray-900"
-              data-testid="dashboard-email"
-            >
-              {user?.email}
-            </p>
-          </div>
-          <span
-            className="inline-block bg-indigo-600 text-white text-xs px-3 py-1 rounded-full font-medium capitalize"
-            data-testid="dashboard-role"
-          >
-            {user?.role}
-          </span>
-        </div>
-      </Card>
-
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         {/* Account balance summary */}
-        <Card title="Account Balance">
+        <Card title="Account Overview">
           {!user?.is_verified && (
             <Alert
               type="warning"
@@ -86,7 +64,7 @@ export function DashboardPage(): React.ReactElement {
         </Card>
 
         {/* MFA status */}
-        <Card title="Security Status">
+        <Card title="Security & MFA">
           {user?.mfa_enabled ? (
             <div data-testid="mfa-status-enabled">
               <div className="flex items-center gap-2 mb-2">

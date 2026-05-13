@@ -67,11 +67,8 @@ export function Layout({ children }: { children: React.ReactNode }): React.React
             </div>
             <div className="flex items-center space-x-4">
               {user && (
-                <span className="text-gray-400 text-sm">
-                  {user.email}{" "}
-                  <span className="inline-block bg-indigo-600 text-white text-xs px-2 py-0.5 rounded">
-                    {user.role}
-                  </span>
+                <span className="text-gray-400 text-sm" data-testid="nav-user-email">
+                  {user.email}
                 </span>
               )}
               <button
