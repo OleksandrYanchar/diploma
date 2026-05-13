@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { newPasswordField } from "@/shared/lib/validation";
 
 export const loginSchema = z.object({
   email: z.string().email("Invalid email address"),
@@ -8,7 +9,7 @@ export const loginSchema = z.object({
 export const registerSchema = z
   .object({
     email: z.string().email("Invalid email address"),
-    password: z.string().min(8, "Password must be at least 8 characters"),
+    password: newPasswordField,
     confirmPassword: z.string(),
   })
   .refine((d) => d.password === d.confirmPassword, {
@@ -27,7 +28,7 @@ export const passwordResetRequestSchema = z.object({
 export const passwordResetConfirmSchema = z
   .object({
     token: z.string().min(1, "Token is required"),
-    new_password: z.string().min(8, "Password must be at least 8 characters"),
+    new_password: newPasswordField,
     confirm_password: z.string(),
   })
   .refine((d) => d.new_password === d.confirm_password, {

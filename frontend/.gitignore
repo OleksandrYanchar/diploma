@@ -3,3 +3,5 @@ dist/
 .env.local
 .env.*.local
 *.tsbuildinfo
+# Un-ignore frontend source lib directories caught by root gitignore's Python lib/ rule
+!src/shared/lib/
