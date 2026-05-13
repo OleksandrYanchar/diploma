@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { getTransactionHistory } from "../api";
+import { getMyAccount } from "@/features/accounts/api";
 import { Card } from "@/shared/ui/Card";
 import { Alert } from "@/shared/ui/Alert";
 import { Button } from "@/shared/ui/Button";
@@ -15,6 +16,13 @@ export function HistoryPage(): React.ReactElement {
   const { data, isLoading, error } = useQuery({
     queryKey: ["transactions", page],
     queryFn: () => getTransactionHistory(page, PAGE_SIZE),
+  });
+
+  // Fetch account id to determine transaction direction (in/out).
+  // Uses the same query key as AccountPage so it hits the React Query cache.
+  const { data: account } = useQuery({
+    queryKey: ["account", "me"],
+    queryFn: getMyAccount,
   });
 
   const totalPages = data ? Math.ceil(data.total / PAGE_SIZE) : 1;
@@ -40,31 +48,48 @@ export function HistoryPage(): React.ReactElement {
                 </tr>
               </thead>
               <tbody>
-                {data.items.map((tx) => (
-                  <tr key={tx.id} className="border-b last:border-0 hover:bg-gray-50">
-                    <td className="py-3 pr-4 text-gray-600 whitespace-nowrap">
-                      {formatDateTime(tx.created_at)}
-                    </td>
-                    <td className="py-3 pr-4 capitalize">{tx.transaction_type}</td>
-                    <td className="py-3 pr-4 font-mono font-medium">
-                      {formatCurrency(tx.amount)}
-                    </td>
-                    <td className="py-3 pr-4">
-                      <span
-                        className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${
-                          tx.status === "completed"
-                            ? "bg-green-100 text-green-800"
-                            : tx.status === "failed"
-                              ? "bg-red-100 text-red-800"
-                              : "bg-yellow-100 text-yellow-800"
-                        }`}
+                {data.items.map((tx) => {
+                  const isIncoming = account && tx.to_account_id === account.id;
+                  const isOutgoing = account && tx.from_account_id === account.id;
+                  const prefix = isIncoming ? "+" : isOutgoing ? "−" : "";
+                  const amountClass = isIncoming
+                    ? "text-green-600 font-mono font-semibold"
+                    : "text-gray-900 font-mono font-medium";
+
+                  return (
+                    <tr
+                      key={tx.id}
+                      data-testid={`transaction-row-${tx.id}`}
+                      className="border-b last:border-0 hover:bg-gray-50"
+                    >
+                      <td className="py-3 pr-4 text-gray-600 whitespace-nowrap">
+                        {formatDateTime(tx.created_at)}
+                      </td>
+                      <td className="py-3 pr-4 capitalize">{tx.transaction_type}</td>
+                      <td
+                        className={`py-3 pr-4 ${amountClass}`}
+                        data-testid="transaction-amount"
+                        data-direction={isIncoming ? "in" : isOutgoing ? "out" : "unknown"}
                       >
-                        {tx.status}
-                      </span>
-                    </td>
-                    <td className="py-3 text-gray-600">{tx.description ?? "—"}</td>
-                  </tr>
-                ))}
+                        {prefix}{formatCurrency(tx.amount)}
+                      </td>
+                      <td className="py-3 pr-4">
+                        <span
+                          className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${
+                            tx.status === "completed"
+                              ? "bg-green-100 text-green-800"
+                              : tx.status === "failed"
+                                ? "bg-red-100 text-red-800"
+                                : "bg-yellow-100 text-yellow-800"
+                          }`}
+                        >
+                          {tx.status}
+                        </span>
+                      </td>
+                      <td className="py-3 text-gray-600">{tx.description ?? "—"}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

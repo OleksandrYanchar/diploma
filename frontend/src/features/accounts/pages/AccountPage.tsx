@@ -7,6 +7,15 @@ import { Alert } from "@/shared/ui/Alert";
 import { formatCurrency, formatDateTime } from "@/lib/formatting";
 import { extractErrorMessage } from "@/shared/api/errors";
 
+function accountStatusClass(status: string | undefined): string {
+  switch (status?.toUpperCase()) {
+    case "ACTIVE":   return "bg-green-100 text-green-800";
+    case "FROZEN":   return "bg-yellow-100 text-yellow-800";
+    case "INACTIVE": return "bg-red-100 text-red-800";
+    default:         return "bg-gray-100 text-gray-500";
+  }
+}
+
 export function AccountPage(): React.ReactElement {
   const { user } = useAuth();
 
@@ -74,11 +83,8 @@ export function AccountPage(): React.ReactElement {
             <dt className="text-xs text-gray-500 uppercase tracking-wide">Status</dt>
             <dd className="mt-1">
               <span
-                className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${
-                  account?.status === "active"
-                    ? "bg-green-100 text-green-800"
-                    : "bg-red-100 text-red-800"
-                }`}
+                data-testid="account-status"
+                className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${accountStatusClass(account?.status)}`}
               >
                 {account?.status}
               </span>
