@@ -17,14 +17,6 @@ export function ProfilePage(): React.ReactElement {
             <dd className="mt-1 text-gray-900">{user.email}</dd>
           </div>
           <div>
-            <dt className="text-xs text-gray-500 uppercase tracking-wide">Role</dt>
-            <dd className="mt-1">
-              <span className="inline-block bg-indigo-100 text-indigo-800 text-xs px-2 py-0.5 rounded font-medium">
-                {user.role}
-              </span>
-            </dd>
-          </div>
-          <div>
             <dt className="text-xs text-gray-500 uppercase tracking-wide">Email Verified</dt>
             <dd className="mt-1">
               {user.is_verified ? (

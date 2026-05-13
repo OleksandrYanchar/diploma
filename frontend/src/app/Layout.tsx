@@ -53,7 +53,6 @@ export function Layout({ children }: { children: React.ReactNode }): React.React
               >
                 ZeroTrust Bank
               </Link>
-              <NavLink to="/dashboard" testId="dashboard">Dashboard</NavLink>
               <NavLink to="/accounts" testId="accounts">Account</NavLink>
               <NavLink to="/transfers" testId="transfers">Transfer</NavLink>
               <NavLink to="/transactions" testId="transactions">History</NavLink>
