@@ -5,6 +5,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { passwordResetConfirmSchema, type PasswordResetConfirmFormValues } from "../schemas";
 import { confirmPasswordReset } from "../api";
 import { Input } from "@/shared/ui/Input";
+import { PasswordInput } from "@/shared/ui/PasswordInput";
 import { Button } from "@/shared/ui/Button";
 import { Alert } from "@/shared/ui/Alert";
 import { Card } from "@/shared/ui/Card";
@@ -67,17 +68,15 @@ export function PasswordResetConfirmPage(): React.ReactElement {
                 error={errors.token?.message}
                 {...register("token")}
               />
-              <Input
+              <PasswordInput
                 label="New Password"
-                type="password"
                 autoComplete="new-password"
                 error={errors.new_password?.message}
                 {...register("new_password")}
               />
               <PasswordRequirements password={watchedPassword} />
-              <Input
+              <PasswordInput
                 label="Confirm New Password"
-                type="password"
                 autoComplete="new-password"
                 error={errors.confirm_password?.message}
                 {...register("confirm_password")}

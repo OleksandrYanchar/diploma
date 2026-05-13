@@ -5,6 +5,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { registerSchema, type RegisterFormValues } from "../schemas";
 import { register as registerUser } from "../api";
 import { Input } from "@/shared/ui/Input";
+import { PasswordInput } from "@/shared/ui/PasswordInput";
 import { Button } from "@/shared/ui/Button";
 import { Alert } from "@/shared/ui/Alert";
 import { Card } from "@/shared/ui/Card";
@@ -62,17 +63,15 @@ export function RegisterPage(): React.ReactElement {
                 error={errors.email?.message}
                 {...register("email")}
               />
-              <Input
+              <PasswordInput
                 label="Password"
-                type="password"
                 autoComplete="new-password"
                 error={errors.password?.message}
                 {...register("password")}
               />
               <PasswordRequirements password={watchedPassword} />
-              <Input
+              <PasswordInput
                 label="Confirm Password"
-                type="password"
                 autoComplete="new-password"
                 error={errors.confirmPassword?.message}
                 {...register("confirmPassword")}

@@ -4,7 +4,7 @@ import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { changePasswordSchema, type ChangePasswordFormValues } from "../schemas";
 import { apiClient } from "@/shared/api/client";
-import { Input } from "@/shared/ui/Input";
+import { PasswordInput } from "@/shared/ui/PasswordInput";
 import { Button } from "@/shared/ui/Button";
 import { Alert } from "@/shared/ui/Alert";
 import { Card } from "@/shared/ui/Card";
@@ -51,24 +51,21 @@ export function PasswordChangePage(): React.ReactElement {
             className="space-y-4"
           >
             {serverError && <Alert type="error" message={serverError} />}
-            <Input
+            <PasswordInput
               label="Current Password"
-              type="password"
               autoComplete="current-password"
               error={errors.current_password?.message}
               {...register("current_password")}
             />
-            <Input
+            <PasswordInput
               label="New Password"
-              type="password"
               autoComplete="new-password"
               error={errors.new_password?.message}
               {...register("new_password")}
             />
             <PasswordRequirements password={watchedPassword} />
-            <Input
+            <PasswordInput
               label="Confirm New Password"
-              type="password"
               autoComplete="new-password"
               error={errors.confirm_password?.message}
               {...register("confirm_password")}

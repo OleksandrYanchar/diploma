@@ -8,6 +8,7 @@ import { useAuth } from "@/lib/auth";
 import { apiClient } from "@/shared/api/client";
 import type { AuthUser } from "@/lib/auth";
 import { Input } from "@/shared/ui/Input";
+import { PasswordInput } from "@/shared/ui/PasswordInput";
 import { Button } from "@/shared/ui/Button";
 import { Alert } from "@/shared/ui/Alert";
 import { Card } from "@/shared/ui/Card";
@@ -65,9 +66,8 @@ export function LoginPage(): React.ReactElement {
               error={errors.email?.message}
               {...register("email")}
             />
-            <Input
+            <PasswordInput
               label="Password"
-              type="password"
               autoComplete="current-password"
               error={errors.password?.message}
               {...register("password")}

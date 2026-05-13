@@ -6,6 +6,7 @@ import { mfaDisableSchema, type MfaDisableFormValues } from "../schemas";
 import { disableMfa } from "../api";
 import { useAuth } from "@/lib/auth";
 import { Input } from "@/shared/ui/Input";
+import { PasswordInput } from "@/shared/ui/PasswordInput";
 import { Button } from "@/shared/ui/Button";
 import { Alert } from "@/shared/ui/Alert";
 import { Card } from "@/shared/ui/Card";
@@ -53,9 +54,8 @@ export function MfaDisablePage(): React.ReactElement {
             className="space-y-4"
           >
             {serverError && <Alert type="error" message={serverError} />}
-            <Input
+            <PasswordInput
               label="Current Password"
-              type="password"
               autoComplete="current-password"
               error={errors.password?.message}
               {...register("password")}
