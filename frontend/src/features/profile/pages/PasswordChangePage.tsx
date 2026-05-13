@@ -9,6 +9,7 @@ import { Button } from "@/shared/ui/Button";
 import { Alert } from "@/shared/ui/Alert";
 import { Card } from "@/shared/ui/Card";
 import { extractErrorMessage } from "@/shared/api/errors";
+import { PasswordRequirements } from "@/shared/ui/PasswordRequirements";
 
 export function PasswordChangePage(): React.ReactElement {
   const navigate = useNavigate();
@@ -18,8 +19,10 @@ export function PasswordChangePage(): React.ReactElement {
   const {
     register,
     handleSubmit,
+    watch,
     formState: { errors, isSubmitting },
   } = useForm<ChangePasswordFormValues>({ resolver: zodResolver(changePasswordSchema) });
+  const watchedPassword = watch("new_password", "");
 
   async function onSubmit(values: ChangePasswordFormValues): Promise<void> {
     setServerError(null);
@@ -62,6 +65,7 @@ export function PasswordChangePage(): React.ReactElement {
               error={errors.new_password?.message}
               {...register("new_password")}
             />
+            <PasswordRequirements password={watchedPassword} />
             <Input
               label="Confirm New Password"
               type="password"

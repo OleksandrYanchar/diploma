@@ -9,6 +9,7 @@ import { Button } from "@/shared/ui/Button";
 import { Alert } from "@/shared/ui/Alert";
 import { Card } from "@/shared/ui/Card";
 import { extractErrorMessage } from "@/shared/api/errors";
+import { PasswordRequirements } from "@/shared/ui/PasswordRequirements";
 
 export function RegisterPage(): React.ReactElement {
   const navigate = useNavigate();
@@ -18,8 +19,10 @@ export function RegisterPage(): React.ReactElement {
   const {
     register,
     handleSubmit,
+    watch,
     formState: { errors, isSubmitting },
   } = useForm<RegisterFormValues>({ resolver: zodResolver(registerSchema) });
+  const watchedPassword = watch("password", "");
 
   async function onSubmit(values: RegisterFormValues): Promise<void> {
     setServerError(null);
@@ -66,6 +69,7 @@ export function RegisterPage(): React.ReactElement {
                 error={errors.password?.message}
                 {...register("password")}
               />
+              <PasswordRequirements password={watchedPassword} />
               <Input
                 label="Confirm Password"
                 type="password"

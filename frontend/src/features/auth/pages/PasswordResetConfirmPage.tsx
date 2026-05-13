@@ -9,6 +9,7 @@ import { Button } from "@/shared/ui/Button";
 import { Alert } from "@/shared/ui/Alert";
 import { Card } from "@/shared/ui/Card";
 import { extractErrorMessage } from "@/shared/api/errors";
+import { PasswordRequirements } from "@/shared/ui/PasswordRequirements";
 
 export function PasswordResetConfirmPage(): React.ReactElement {
   const [searchParams] = useSearchParams();
@@ -21,10 +22,12 @@ export function PasswordResetConfirmPage(): React.ReactElement {
     register,
     handleSubmit,
     setValue,
+    watch,
     formState: { errors, isSubmitting },
   } = useForm<PasswordResetConfirmFormValues>({
     resolver: zodResolver(passwordResetConfirmSchema),
   });
+  const watchedPassword = watch("new_password", "");
 
   useEffect(() => {
     if (tokenFromUrl) setValue("token", tokenFromUrl);
@@ -71,6 +74,7 @@ export function PasswordResetConfirmPage(): React.ReactElement {
                 error={errors.new_password?.message}
                 {...register("new_password")}
               />
+              <PasswordRequirements password={watchedPassword} />
               <Input
                 label="Confirm New Password"
                 type="password"
