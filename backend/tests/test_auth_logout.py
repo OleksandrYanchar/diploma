@@ -7,10 +7,15 @@ Covers:
 - Redis session is deleted after logout (SR-10)
 - LOGOUT audit log entry is written (SR-16)
 - Missing Authorization header returns 403 (HTTPBearer behaviour)
+- Missing zt_rt cookie results in idempotent 200 (empty string → no-op revocation)
 
-All tests use the register → verify-email → login helper pattern to produce
-a valid session before exercising the logout endpoint.  Each test is fully
-isolated via the ``async_client`` fixture (fresh SQLite + FakeRedis per test).
+The refresh token is delivered via an HttpOnly ``Set-Cookie: zt_rt=...``
+header (SR-07).  Tests that need the raw refresh token value read it from the
+httpx cookie jar.  Tests that exercise logout without a cookie pass no
+``zt_rt`` cookie, which triggers the idempotent no-op path in the service.
+
+All tests are fully isolated via the ``async_client`` fixture
+(fresh SQLite + FakeRedis per test).
 """
 
 import uuid
@@ -61,15 +66,16 @@ async def test_logout_returns_200(
 
     Happy-path confirmation that the endpoint is reachable, correctly wired,
     and returns the expected response shape (SR-09, SR-10).
+
+    The refresh token is sent automatically via the zt_rt HttpOnly cookie that
+    was set during login.
     """
     email = "logout_200@example.com"
-    _, access_token, refresh_token = await register_verify_login(
-        async_client, capsys, email
-    )
+    _, access_token = await register_verify_login(async_client, capsys, email)
 
+    # The httpx client sends the zt_rt cookie automatically from the login response.
     response = await async_client.post(
         _LOGOUT_URL,
-        json={"refresh_token": refresh_token},
         headers={"Authorization": f"Bearer {access_token}"},
     )
 
@@ -90,13 +96,10 @@ async def test_logout_blacklists_access_token(
     blacklist and that ``get_current_user`` (Step 3) rejects it with 401.
     """
     email = "logout_blacklist@example.com"
-    _, access_token, refresh_token = await register_verify_login(
-        async_client, capsys, email
-    )
+    _, access_token = await register_verify_login(async_client, capsys, email)
 
     logout_resp = await async_client.post(
         _LOGOUT_URL,
-        json={"refresh_token": refresh_token},
         headers={"Authorization": f"Bearer {access_token}"},
     )
     assert logout_resp.status_code == 200
@@ -121,13 +124,14 @@ async def test_logout_revokes_refresh_token(
     preserved (SR-07, SR-16).
     """
     email = "logout_revoke_rt@example.com"
-    _, access_token, refresh_token = await register_verify_login(
-        async_client, capsys, email
-    )
+    _, access_token = await register_verify_login(async_client, capsys, email)
+
+    # Capture the refresh token from the cookie before logout clears it.
+    refresh_token = async_client.cookies.get("zt_rt")
+    assert refresh_token is not None
 
     logout_resp = await async_client.post(
         _LOGOUT_URL,
-        json={"refresh_token": refresh_token},
         headers={"Authorization": f"Bearer {access_token}"},
     )
     assert logout_resp.status_code == 200
@@ -154,9 +158,7 @@ async def test_logout_deletes_redis_session(
     that ``session:{session_id}`` no longer exists in FakeRedis.
     """
     email = "logout_redis@example.com"
-    _, access_token, refresh_token = await register_verify_login(
-        async_client, capsys, email
-    )
+    _, access_token = await register_verify_login(async_client, capsys, email)
 
     settings = Settings()  # type: ignore[call-arg]
     decoded = pyjwt.decode(
@@ -169,7 +171,6 @@ async def test_logout_deletes_redis_session(
 
     logout_resp = await async_client.post(
         _LOGOUT_URL,
-        json={"refresh_token": refresh_token},
         headers={"Authorization": f"Bearer {access_token}"},
     )
     assert logout_resp.status_code == 200
@@ -208,13 +209,11 @@ async def test_logout_audit_log_written(
         json={"email": email, "password": STRONG_PASSWORD},
     )
     assert login_resp.status_code == 200
-    login_data = login_resp.json()
-    access_token = login_data["access_token"]
-    refresh_token = login_data["refresh_token"]
+    access_token = login_resp.json()["access_token"]
+    # refresh token is in the cookie jar automatically.
 
     logout_resp = await async_client.post(
         _LOGOUT_URL,
-        json={"refresh_token": refresh_token},
         headers={"Authorization": f"Bearer {access_token}"},
     )
     assert logout_resp.status_code == 200
@@ -242,33 +241,35 @@ async def test_logout_requires_authentication(
     entirely absent.  The logout endpoint must not be accessible without a
     valid credential.
     """
-    response = await async_client.post(
-        _LOGOUT_URL,
-        json={"refresh_token": "some-token-value"},
-    )
+    response = await async_client.post(_LOGOUT_URL)
     assert response.status_code == 403
 
 
 @pytest.mark.asyncio
-async def test_logout_missing_refresh_token_returns_422(
+async def test_logout_missing_cookie_is_idempotent(
     async_client: AsyncClient,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """POST /auth/logout without refresh_token in the body returns 422.
+    """POST /auth/logout without the zt_rt cookie returns 200 (idempotent).
 
-    The ``LogoutRequest`` schema requires a ``refresh_token`` field. Omitting it
-    must trigger Pydantic validation failure (422) before any service logic
-    runs.
+    The logout endpoint reads the refresh token from the ``zt_rt`` HttpOnly
+    cookie (SR-07).  When the cookie is absent, an empty string is passed to
+    the service.  The SHA-256 hash of an empty string does not match any
+    stored token hash, so ``scalar_one_or_none`` returns None and the
+    revocation step is silently skipped.  The access token JTI is still
+    blacklisted normally.  The response is HTTP 200 — logout is idempotent
+    with respect to a missing refresh token cookie.
     """
     email = "logout_missing_rt@example.com"
-    _, access_token, _rt = await register_verify_login(async_client, capsys, email)
+    _, access_token = await register_verify_login(async_client, capsys, email)
 
+    # Send the request without the zt_rt cookie by explicitly clearing it.
     resp = await async_client.post(
         _LOGOUT_URL,
-        json={},
         headers={"Authorization": f"Bearer {access_token}"},
+        cookies={"zt_rt": ""},
     )
-    assert resp.status_code == 422
+    assert resp.status_code == 200
 
 
 @pytest.mark.asyncio
@@ -282,20 +283,16 @@ async def test_logout_blacklisted_token_rejected_on_subsequent_request(
     including a second logout attempt.
     """
     email = "logout_double@example.com"
-    _, access_token, refresh_token = await register_verify_login(
-        async_client, capsys, email
-    )
+    _, access_token = await register_verify_login(async_client, capsys, email)
 
     first = await async_client.post(
         _LOGOUT_URL,
-        json={"refresh_token": refresh_token},
         headers={"Authorization": f"Bearer {access_token}"},
     )
     assert first.status_code == 200
 
     second = await async_client.post(
         _LOGOUT_URL,
-        json={"refresh_token": refresh_token},
         headers={"Authorization": f"Bearer {access_token}"},
     )
     assert second.status_code == 401

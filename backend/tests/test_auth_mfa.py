@@ -37,7 +37,7 @@ async def test_mfa_setup_returns_200_with_secret_and_qr(
 ) -> None:
     """POST /auth/mfa/setup returns 200 with a non-empty secret and QR code (SR-04)."""
     email = "mfa_setup_200@example.com"
-    _user_id, access_token, _ = await register_verify_login(async_client, capsys, email)
+    _user_id, access_token = await register_verify_login(async_client, capsys, email)
 
     response = await async_client.post(
         _MFA_SETUP_URL,
@@ -72,7 +72,7 @@ async def test_mfa_setup_persists_secret_and_does_not_enable_mfa(
     """mfa_secret is written to DB; mfa_enabled remains False
     until the enable step (SR-04)."""
     email = "mfa_setup_db@example.com"
-    user_id, access_token, _ = await register_verify_login(async_client, capsys, email)
+    user_id, access_token = await register_verify_login(async_client, capsys, email)
 
     response = await async_client.post(
         _MFA_SETUP_URL,
@@ -87,8 +87,16 @@ async def test_mfa_setup_persists_secret_and_does_not_enable_mfa(
     assert user is not None
     assert user.mfa_secret is not None, "mfa_secret must be set after setup"
     assert (
-        user.mfa_secret == returned_secret
-    ), "Stored secret must match the secret returned in the response"
+        user.mfa_secret != returned_secret
+    ), "Stored secret must be encrypted, not the plaintext Base32 value (SR-04)"
+    # The stored ciphertext must decrypt back to the returned plaintext.
+    from app.core.mfa_encryption import decrypt_mfa_secret
+    from tests.conftest import _TEST_SETTINGS
+
+    decrypted = decrypt_mfa_secret(
+        user.mfa_secret, _TEST_SETTINGS.mfa_secret_encryption_key
+    )
+    assert decrypted == returned_secret, "Decrypted secret must match setup response"
     assert (
         user.mfa_enabled is False
     ), "mfa_enabled must remain False until the enable step is completed"
@@ -102,7 +110,7 @@ async def test_mfa_setup_writes_audit_log(
 ) -> None:
     """A MFA_SETUP_INITIATED audit log entry is written on success (SR-16)."""
     email = "mfa_setup_audit@example.com"
-    user_id, access_token, _ = await register_verify_login(async_client, capsys, email)
+    user_id, access_token = await register_verify_login(async_client, capsys, email)
 
     response = await async_client.post(
         _MFA_SETUP_URL,
@@ -141,7 +149,7 @@ async def test_mfa_setup_fails_when_already_enabled(
 ) -> None:
     """POST /auth/mfa/setup returns 400 if MFA is already enabled (SR-04)."""
     email = "mfa_setup_already_enabled@example.com"
-    user_id, access_token, _ = await register_verify_login(async_client, capsys, email)
+    user_id, access_token = await register_verify_login(async_client, capsys, email)
 
     result = await db_session.execute(select(User).where(User.id == uuid.UUID(user_id)))
     user: User | None = result.scalar_one_or_none()
@@ -167,7 +175,7 @@ async def test_mfa_setup_overwrites_abandoned_secret(
     """Calling setup twice overwrites the abandoned secret;
     only the latest is stored."""
     email = "mfa_setup_overwrite@example.com"
-    user_id, access_token, _ = await register_verify_login(async_client, capsys, email)
+    user_id, access_token = await register_verify_login(async_client, capsys, email)
 
     first_resp = await async_client.post(
         _MFA_SETUP_URL,
@@ -189,8 +197,15 @@ async def test_mfa_setup_overwrites_abandoned_secret(
     user: User | None = result.scalar_one_or_none()
     assert user is not None
     assert (
-        user.mfa_secret == second_secret
-    ), "The stored secret must match the most recent setup response"
+        user.mfa_secret != second_secret
+    ), "Stored secret must be encrypted, not the plaintext Base32 value (SR-04)"
+    from app.core.mfa_encryption import decrypt_mfa_secret
+    from tests.conftest import _TEST_SETTINGS
+
+    decrypted = decrypt_mfa_secret(
+        user.mfa_secret, _TEST_SETTINGS.mfa_secret_encryption_key
+    )
+    assert decrypted == second_secret, "Latest secret must match setup secret"
     assert user.mfa_enabled is False
 
 
@@ -216,7 +231,7 @@ async def test_mfa_enable_valid_code_returns_200_and_activates_mfa(
     """Valid TOTP → 200; mfa_enabled True in DB;
     MFA_ENABLED audit log written (SR-04, SR-16)."""
     email = "mfa_enable_valid@example.com"
-    user_id, access_token, _ = await register_verify_login(async_client, capsys, email)
+    user_id, access_token = await register_verify_login(async_client, capsys, email)
 
     secret = await _setup_mfa_and_get_secret(async_client, access_token)
 
@@ -255,7 +270,7 @@ async def test_mfa_enable_invalid_code_returns_401_and_writes_mfa_failed_audit(
     """Invalid TOTP → 401; mfa_enabled stays False;
     MFA_FAILED audit committed before raise (SR-04, SR-16)."""
     email = "mfa_enable_invalid@example.com"
-    user_id, access_token, _ = await register_verify_login(async_client, capsys, email)
+    user_id, access_token = await register_verify_login(async_client, capsys, email)
 
     await _setup_mfa_and_get_secret(async_client, access_token)
 
@@ -291,7 +306,7 @@ async def test_mfa_enable_without_prior_setup_returns_400(
     """POST /auth/mfa/enable without prior setup returns 400
     — no secret to verify (SR-04)."""
     email = "mfa_enable_no_setup@example.com"
-    _user_id, access_token, _ = await register_verify_login(async_client, capsys, email)
+    _user_id, access_token = await register_verify_login(async_client, capsys, email)
 
     response = await async_client.post(
         _MFA_ENABLE_URL,
@@ -312,7 +327,7 @@ async def test_mfa_enable_when_already_enabled_returns_400(
     """POST /auth/mfa/enable when already active returns 400;
     re-activation requires a disable step (SR-04)."""
     email = "mfa_enable_already_on@example.com"
-    user_id, access_token, _ = await register_verify_login(async_client, capsys, email)
+    user_id, access_token = await register_verify_login(async_client, capsys, email)
 
     secret = await _setup_mfa_and_get_secret(async_client, access_token)
 
@@ -347,7 +362,7 @@ async def test_mfa_enable_missing_totp_code_returns_422(
 ) -> None:
     """POST /auth/mfa/enable with empty body returns 422 (Pydantic validation)."""
     email = "mfa_enable_no_code@example.com"
-    _user_id, access_token, _ = await register_verify_login(async_client, capsys, email)
+    _user_id, access_token = await register_verify_login(async_client, capsys, email)
     await _setup_mfa_and_get_secret(async_client, access_token)
 
     resp = await async_client.post(
@@ -380,7 +395,7 @@ async def _register_verify_login_and_enable_mfa(
 
     Returns ``(user_id, totp_secret)`` with mfa_enabled=True on the account.
     """
-    user_id, access_token, _ = await register_verify_login(async_client, capsys, email)
+    user_id, access_token = await register_verify_login(async_client, capsys, email)
 
     setup_resp = await async_client.post(
         _MFA_SETUP_URL,
@@ -423,7 +438,11 @@ async def test_mfa_login_no_totp_code_returns_mfa_required(
     data = response.json()
     assert data.get("mfa_required") is True, "Expected mfa_required=True"
     assert "access_token" not in data, "access_token must not be issued without TOTP"
-    assert "refresh_token" not in data, "refresh_token must not be issued without TOTP"
+    # refresh_token is never in the JSON body (SR-07); verify no cookie either.
+    assert "refresh_token" not in data, "refresh_token must not appear in JSON body"
+    assert (
+        response.cookies.get("zt_rt") is None
+    ), "zt_rt cookie must not be set when MFA gate fires — no session created"
 
 
 @pytest.mark.asyncio
@@ -486,9 +505,13 @@ async def test_mfa_login_valid_totp_code_returns_tokens_and_writes_mfa_verified_
     assert (
         "access_token" in data
     ), "access_token must be present on successful MFA login"
+    # SR-07: refresh token is in the HttpOnly cookie, not the JSON body.
     assert (
-        "refresh_token" in data
-    ), "refresh_token must be present on successful MFA login"
+        "refresh_token" not in data
+    ), "refresh_token must not appear in JSON body (SR-07)"
+    assert (
+        response.cookies.get("zt_rt") is not None
+    ), "zt_rt cookie must be set after successful MFA login (SR-07)"
     assert data.get("token_type") == "bearer"
     assert isinstance(data.get("expires_in"), int) and data["expires_in"] > 0
 
@@ -510,7 +533,7 @@ async def test_login_without_mfa_still_works_after_step4(
     """Regression guard: non-MFA login still returns full TokenResponse
     after MFA gate added."""
     email = "no_mfa_regression@example.com"
-    _user_id, access_token, _ = await register_verify_login(async_client, capsys, email)
+    _user_id, access_token = await register_verify_login(async_client, capsys, email)
 
     # register_verify_login already performs a successful login and returns the
     # access_token.  We assert here that the login step inside that helper did
@@ -526,7 +549,13 @@ async def test_login_without_mfa_still_works_after_step4(
 
     data = response.json()
     assert "access_token" in data, "Non-MFA login must return access_token"
-    assert "refresh_token" in data, "Non-MFA login must return refresh_token"
+    # SR-07: refresh token is in the HttpOnly cookie, not the JSON body.
+    assert (
+        "refresh_token" not in data
+    ), "refresh_token must not appear in JSON body (SR-07)"
+    assert (
+        response.cookies.get("zt_rt") is not None
+    ), "zt_rt cookie must be set after non-MFA login (SR-07)"
     assert data.get("token_type") == "bearer"
 
 
@@ -690,7 +719,7 @@ async def test_mfa_disable_when_mfa_not_enabled_returns_400(
 ) -> None:
     """POST /auth/mfa/disable on a non-enrolled account returns 400 (SR-04)."""
     email = "mfa_disable_not_enabled@example.com"
-    _user_id, access_token, _ = await register_verify_login(async_client, capsys, email)
+    _user_id, access_token = await register_verify_login(async_client, capsys, email)
 
     response = await async_client.post(
         _MFA_DISABLE_URL,
@@ -720,7 +749,7 @@ async def test_mfa_disable_missing_fields_returns_422(
     """POST /auth/mfa/disable with missing required fields
     returns 422 (Pydantic validation)."""
     email = f"mfa_dis_422_{id(body)}@example.com"
-    _user_id, access_token, _ = await register_verify_login(async_client, capsys, email)
+    _user_id, access_token = await register_verify_login(async_client, capsys, email)
 
     resp = await async_client.post(
         _MFA_DISABLE_URL,
@@ -828,7 +857,7 @@ async def test_disable_mfa_wrong_password_triggers_lockout(
     from tests.conftest import _TEST_SETTINGS
 
     email = f"dmfa_lockout_{uuid.uuid4().hex[:8]}@example.com"
-    user_id, access_token, _ = await register_verify_login(async_client, capsys, email)
+    user_id, access_token = await register_verify_login(async_client, capsys, email)
 
     # Enable MFA first so disable_mfa checks can run (past the mfa_enabled guard).
     setup_resp = await async_client.post(
@@ -901,6 +930,12 @@ async def test_mfa_disable_login_no_longer_requires_totp_after_disable(
     assert response.status_code == 200
     data = response.json()
     assert "access_token" in data, "access_token must be issued after MFA is disabled"
-    assert "refresh_token" in data, "refresh_token must be issued after MFA is disabled"
+    # SR-07: refresh token is in the HttpOnly cookie, not the JSON body.
+    assert (
+        "refresh_token" not in data
+    ), "refresh_token must not appear in JSON body (SR-07)"
+    assert (
+        response.cookies.get("zt_rt") is not None
+    ), "zt_rt cookie must be set after login once MFA is disabled (SR-07)"
     assert data.get("token_type") == "bearer"
     assert "mfa_required" not in data, "mfa_required must not appear in TokenResponse"

@@ -31,10 +31,17 @@ async def register_verify_login(
     capsys: pytest.CaptureFixture[str],
     email: str,
     password: str = STRONG_PASSWORD,
-) -> tuple[str, str, str]:
+) -> tuple[str, str]:
     """Register a user, verify email, and login.
 
-    Returns ``(user_id, access_token, refresh_token)``.
+    Returns ``(user_id, access_token)``.
+
+    The refresh token is no longer returned from this helper because it is
+    now delivered via an HttpOnly ``Set-Cookie: zt_rt=...`` header (SR-07).
+    Callers that need the refresh token for a specific test should read it
+    directly from the httpx client cookie jar::
+
+        raw_refresh = client.cookies.get("zt_rt")
     """
     reg = await client.post(REGISTER_URL, json={"email": email, "password": password})
     assert reg.status_code == 201
@@ -48,7 +55,7 @@ async def register_verify_login(
     login = await client.post(LOGIN_URL, json={"email": email, "password": password})
     assert login.status_code == 200
     data = login.json()
-    return user_id, data["access_token"], data["refresh_token"]
+    return user_id, data["access_token"]
 
 
 async def enable_mfa(client: AsyncClient, access_token: str) -> str:

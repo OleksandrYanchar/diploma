@@ -148,7 +148,11 @@ async def rate_limit_client_short_window(
 
 _LOGIN_PAYLOAD = {"email": "x@example.com", "password": "wrong"}
 _RESET_PAYLOAD = {"email": "x@example.com"}
-_REFRESH_PAYLOAD = {"refresh_token": "notarealtoken"}
+# Refresh token is now read from the zt_rt HttpOnly cookie (SR-07).
+# The rate-limit test only cares about hitting the endpoint N+1 times;
+# whether the endpoint returns 401 (no valid cookie) or 429 (rate-limited)
+# is determined by which request we are on.
+_REFRESH_COOKIES = {"zt_rt": "notarealtoken"}
 _REGISTER_PAYLOAD = {
     "email": "new@example.com",
     "password": "StrongPass123!",
@@ -221,11 +225,15 @@ async def test_refresh_rate_limit_triggers(
 
     for _ in range(limit):
         await rate_limit_client.post(
-            "/api/v1/auth/refresh", json=_REFRESH_PAYLOAD, headers=ip_headers
+            "/api/v1/auth/refresh",
+            cookies=_REFRESH_COOKIES,
+            headers=ip_headers,
         )
 
     resp = await rate_limit_client.post(
-        "/api/v1/auth/refresh", json=_REFRESH_PAYLOAD, headers=ip_headers
+        "/api/v1/auth/refresh",
+        cookies=_REFRESH_COOKIES,
+        headers=ip_headers,
     )
     assert resp.status_code == 429
     assert "Retry-After" in resp.headers

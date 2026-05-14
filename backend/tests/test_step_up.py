@@ -7,8 +7,10 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.mfa_encryption import encrypt_mfa_secret
 from app.models.audit_log import AuditLog
 from app.models.user import User
+from tests.conftest import _TEST_SETTINGS
 from tests.helpers import make_orm_user
 
 STEP_UP_URL = "/api/v1/auth/step-up"
@@ -39,7 +41,10 @@ async def _make_mfa_user(
     """
     user, token = await make_orm_user(db, redis, email=email)
     # Activate MFA directly on the ORM object — no HTTP round-trip needed.
-    user.mfa_secret = mfa_secret
+    # Secret must be stored encrypted (SR-04), matching what the service layer writes.
+    user.mfa_secret = encrypt_mfa_secret(
+        mfa_secret, _TEST_SETTINGS.mfa_secret_encryption_key
+    )
     user.mfa_enabled = True
     await db.commit()
     await db.refresh(user)

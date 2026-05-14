@@ -8,10 +8,10 @@ Security note: /register, /verify-email, /login, /refresh, /password/reset/reque
 and /password/reset/confirm are unauthenticated by design.  /logout, /mfa/setup,
 /mfa/enable, /mfa/disable, /password/change, and /step-up require a valid Bearer
 token via ``get_current_user``.  /step-up additionally requires ``require_verified``.
-Rate limiting is enforced at the Nginx layer (SR-15).
+Rate limiting is enforced at the application middleware layer (SR-15).
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import InvalidTokenError
 from redis.asyncio import Redis
@@ -39,7 +39,6 @@ from app.dependencies.auth import get_current_user, require_verified
 from app.models.user import User
 from app.schemas.auth import (
     LoginRequest,
-    LogoutRequest,
     MFADisableRequest,
     MFAEnableRequest,
     MFARequiredResponse,
@@ -47,12 +46,16 @@ from app.schemas.auth import (
     PasswordChangeRequest,
     PasswordResetConfirmRequest,
     PasswordResetRequest,
-    RefreshRequest,
     StepUpRequest,
     StepUpResponse,
     TokenResponse,
 )
 from app.schemas.user import UserCreate, UserResponse
+
+# Cookie name for the HttpOnly refresh token (SR-07).
+# All three auth endpoints (login, refresh, logout) must use this constant so
+# that the cookie name is defined in exactly one place.
+_REFRESH_COOKIE = "zt_rt"
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -158,6 +161,7 @@ async def verify_email_endpoint(
 )
 async def login(
     request: Request,
+    response: Response,
     body: LoginRequest,
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),  # type: ignore[type-arg]
@@ -169,29 +173,35 @@ async def login(
     verification, account lockout enforcement, MFA gating, session creation
     in Redis, and audit log writes.
 
-    On success, returns a short-lived JWT access token (SR-06) and an opaque
-    refresh token (SR-07).  The refresh token is stored in the DB as a
-    SHA-256 hash only — the raw value is returned here once and never persisted.
+    On success, returns a short-lived JWT access token (SR-06) in the JSON
+    body.  The opaque refresh token (SR-07) is delivered via an HttpOnly
+    ``Set-Cookie: zt_rt=...`` header so that JavaScript cannot read it,
+    eliminating the XSS token-theft vector.  The refresh token is stored in
+    the DB as a SHA-256 hash only — the raw value is set in the cookie once
+    and never persisted in plaintext.
 
     When the account has MFA enabled the service returns the sentinel
-    ``(None, None)`` — no session is created and no tokens are issued.  This
-    endpoint then returns an ``MFARequiredResponse`` (HTTP 200) so that the
-    client can prompt the user for their TOTP code and re-submit.  The TOTP
-    verification path is implemented in Phase 3.
+    ``(None, None)`` — no session is created, no tokens are issued, and no
+    cookie is set.  This endpoint then returns an ``MFARequiredResponse``
+    (HTTP 200) so that the client can prompt the user for their TOTP code
+    and re-submit.
 
     Args:
         request:  The incoming FastAPI Request, used to extract IP and
                   User-Agent for audit logging (SR-16).
+        response: The outgoing FastAPI Response, used to set the HttpOnly
+                  refresh token cookie (SR-07).
         body:     Validated ``LoginRequest`` payload (email + password; optional
-                  TOTP code for MFA accounts in Phase 3).
+                  TOTP code for MFA accounts).
         db:       Injected async database session.
         redis:    Injected Redis client for session storage (SR-10).
         settings: Injected application settings.
 
     Returns:
-        ``TokenResponse`` (access_token, refresh_token, token_type, expires_in)
-        on successful authentication, or ``MFARequiredResponse`` (mfa_required,
-        message) when the account requires a TOTP code.
+        ``TokenResponse`` (access_token, token_type, expires_in) on successful
+        authentication — the refresh token is in the ``Set-Cookie`` header.
+        Returns ``MFARequiredResponse`` (mfa_required, message) when the
+        account requires a TOTP code; no cookie is set in that case.
 
     Raises:
         HTTPException 401: Invalid credentials (wrong email or wrong password).
@@ -213,11 +223,23 @@ async def login(
     )
 
     if access_token is None:
+        # MFA gate: no session created, no cookie set.
         return MFARequiredResponse()
 
+    # SR-07: deliver the refresh token via HttpOnly cookie only.
+    # path="/api/v1/auth" scopes the cookie to the auth sub-tree so it is not
+    # sent with every API request (least-privilege cookie scope).
+    response.set_cookie(
+        key=_REFRESH_COOKIE,
+        value=raw_refresh,
+        httponly=True,
+        secure=settings.cookie_secure,
+        samesite=settings.cookie_samesite,
+        path="/api/v1/auth",
+        max_age=settings.refresh_token_expire_days * 86400,
+    )
     return TokenResponse(
         access_token=access_token,
-        refresh_token=raw_refresh,
         expires_in=settings.access_token_expire_minutes * 60,
     )
 
@@ -230,7 +252,7 @@ async def login(
 )
 async def refresh(
     request: Request,
-    body: RefreshRequest,
+    response: Response,
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),  # type: ignore[type-arg]
     settings: Settings = Depends(get_settings),
@@ -239,8 +261,8 @@ async def refresh(
 
     This endpoint is intentionally unauthenticated: its entire purpose is to
     renew an expired or expiring access token.  The access token is NOT required
-    in the Authorization header here — the refresh token in the request body is
-    the sole credential.
+    in the Authorization header here — the refresh token in the ``zt_rt``
+    HttpOnly cookie is the sole credential.
 
     The service layer enforces:
     - SR-07: The old refresh token is marked revoked immediately on use.  A new
@@ -253,35 +275,52 @@ async def refresh(
     - SR-16: A TOKEN_REFRESHED audit log entry is written on success.
 
     Args:
-        request:  The incoming FastAPI Request, used to extract IP and
-                  User-Agent for audit logging (SR-16).
-        body:     Validated ``RefreshRequest`` containing the raw refresh token.
+        request:  The incoming FastAPI Request, used to read the ``zt_rt``
+                  HttpOnly cookie and extract IP/User-Agent for audit logging
+                  (SR-07, SR-16).
+        response: The outgoing FastAPI Response, used to set the rotated
+                  HttpOnly refresh token cookie (SR-07).
         db:       Injected async database session.
         redis:    Injected Redis client for session management.
         settings: Injected application settings (signing key, token lifetimes).
 
     Returns:
-        A ``TokenResponse`` with a new ``access_token``, new ``refresh_token``,
-        ``token_type="bearer"``, and ``expires_in`` (seconds).
+        A ``TokenResponse`` with a new ``access_token``, ``token_type="bearer"``,
+        and ``expires_in`` (seconds).  The new refresh token is in the rotated
+        ``Set-Cookie: zt_rt=...`` header.
 
     Raises:
-        HTTPException 401: Token not found, already used (SR-08), or expired.
+        HTTPException 401: No ``zt_rt`` cookie present, token not found,
+                           already used (SR-08), or expired.
     """
+    raw_refresh = request.cookies.get(_REFRESH_COOKIE)
+    if not raw_refresh:
+        raise HTTPException(status_code=401, detail="No refresh token")
+
     ip_address = request.headers.get("X-Real-IP") or (
         request.client.host if request.client else None
     )
     user_agent = request.headers.get("User-Agent")
     new_access_token, new_raw_refresh = await refresh_tokens_service(
-        raw_refresh_token=body.refresh_token,
+        raw_refresh_token=raw_refresh,
         db=db,
         redis=redis,
         settings=settings,
         ip_address=ip_address,
         user_agent=user_agent,
     )
+    # SR-07: rotate the HttpOnly cookie with the new refresh token.
+    response.set_cookie(
+        key=_REFRESH_COOKIE,
+        value=new_raw_refresh,
+        httponly=True,
+        secure=settings.cookie_secure,
+        samesite=settings.cookie_samesite,
+        path="/api/v1/auth",
+        max_age=settings.refresh_token_expire_days * 86400,
+    )
     return TokenResponse(
         access_token=new_access_token,
-        refresh_token=new_raw_refresh,
         expires_in=settings.access_token_expire_minutes * 60,
     )
 
@@ -293,7 +332,7 @@ async def refresh(
 )
 async def logout(
     request: Request,
-    body: LogoutRequest,
+    response: Response,
     current_user: User = Depends(get_current_user),
     credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer()),
     db: AsyncSession = Depends(get_db),
@@ -310,17 +349,20 @@ async def logout(
     is validated by both ``get_current_user`` and a second
     ``decode_access_token`` call to extract the raw payload (JTI and
     session_id) needed for revocation.  The double decode is safe and correct
-    -- both calls validate against the same signing key and the overhead is
+    — both calls validate against the same signing key and the overhead is
     negligible.
 
-    The refresh token is supplied in the request body and is revoked by its
-    SHA-256 hash.  If it is already revoked (e.g. from a prior logout or
-    rotation), the step is skipped silently.
+    The refresh token is read from the ``zt_rt`` HttpOnly cookie.  If the
+    cookie is absent or empty, an empty string is passed to the service;
+    ``scalar_one_or_none`` returns None for a non-matching hash and the
+    revocation step is skipped silently.  This makes logout idempotent with
+    respect to a missing or already-cleared cookie.
 
     Args:
-        request:      The incoming FastAPI Request, used to extract IP and
-                      User-Agent for audit logging (SR-16).
-        body:         Validated ``LogoutRequest`` containing the raw refresh token.
+        request:      The incoming FastAPI Request, used to read the ``zt_rt``
+                      cookie and extract IP/User-Agent for audit logging (SR-16).
+        response:     The outgoing FastAPI Response, used to clear the ``zt_rt``
+                      cookie after logout (SR-07).
         current_user: Authenticated User provided by ``get_current_user``.
         credentials:  Raw Bearer credentials extracted by ``HTTPBearer``.
         db:           Injected async database session.
@@ -342,19 +384,26 @@ async def logout(
             detail="Invalid or expired token",
         ) from exc
 
+    # Read the refresh token from the HttpOnly cookie.  An empty string is safe
+    # to pass to the service — the SHA-256 hash of "" will not match any stored
+    # token hash, so the revocation step is a no-op (idempotent logout).
+    raw_refresh = request.cookies.get(_REFRESH_COOKIE) or ""
+
     ip_address = request.headers.get("X-Real-IP") or (
         request.client.host if request.client else None
     )
     user_agent = request.headers.get("User-Agent")
     await logout_service(
         user=current_user,
-        raw_refresh_token=body.refresh_token,
+        raw_refresh_token=raw_refresh,
         access_token_payload=payload,
         db=db,
         redis=redis,
         ip_address=ip_address,
         user_agent=user_agent,
     )
+    # SR-07: clear the refresh token cookie so the browser discards it.
+    response.delete_cookie(_REFRESH_COOKIE, path="/api/v1/auth")
     return {"message": "Logged out successfully."}
 
 
@@ -429,6 +478,7 @@ async def mfa_enable(
     current_user: User = Depends(get_current_user),
     _verified: None = Depends(require_verified),
     db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
 ) -> dict[str, str]:
     """Verify the first TOTP code and activate MFA on the authenticated account.
 
@@ -467,6 +517,7 @@ async def mfa_enable(
         user=current_user,
         totp_code=body.totp_code,
         db=db,
+        settings=settings,
         ip_address=ip_address,
         user_agent=user_agent,
     )

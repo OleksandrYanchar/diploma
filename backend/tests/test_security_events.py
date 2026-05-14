@@ -152,15 +152,14 @@ async def test_token_reuse_creates_critical_security_event(
     TOKEN_REUSE SecurityEvent; TOKEN_REFRESHED AuditLog still
     present (SR-08, SR-16, SR-17)."""
     email = f"token_reuse_event_{uuid.uuid4().hex[:8]}@example.com"
-    user_id_str, _access, refresh_token_1 = await register_verify_login(
-        async_client, capsys, email
-    )
+    user_id_str, _access = await register_verify_login(async_client, capsys, email)
+    # The refresh token is now in the zt_rt HttpOnly cookie (SR-07).
+    refresh_token_1 = async_client.cookies.get("zt_rt")
+    assert refresh_token_1 is not None
     user_id = uuid.UUID(user_id_str)
 
-    rotate_resp = await async_client.post(
-        _REFRESH_URL,
-        json={"refresh_token": refresh_token_1},
-    )
+    # Rotate — the httpx client sends the cookie automatically.
+    rotate_resp = await async_client.post(_REFRESH_URL)
     assert rotate_resp.status_code == 200
 
     token_hash = hash_token(refresh_token_1)
@@ -171,9 +170,10 @@ async def test_token_reuse_creates_critical_security_event(
     assert revoked_row is not None
     assert revoked_row.revoked is True, "Token must be revoked after rotation"
 
+    # Replay the old (now-revoked) token explicitly via cookie.
     reuse_resp = await async_client.post(
         _REFRESH_URL,
-        json={"refresh_token": refresh_token_1},
+        cookies={"zt_rt": refresh_token_1},
     )
     assert reuse_resp.status_code == 401
 

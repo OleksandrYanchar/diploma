@@ -11,6 +11,12 @@ objects directly — every state change flows through the API surface so that
 the full dependency chain (schemas, service, security, audit logging) is
 exercised end-to-end.
 
+The refresh token is now delivered via an HttpOnly ``Set-Cookie: zt_rt=...``
+header (SR-07).  The httpx ``AsyncClient`` stores cookies automatically in
+its cookie jar and sends them on subsequent requests to the same origin, so
+the cookie-based refresh and logout flows work transparently when the same
+client instance is reused across calls.
+
 Run with ``-s`` to see the step-by-step request trace::
 
     poetry run pytest tests/test_e2e_auth_lifecycle.py -v -s
@@ -49,7 +55,7 @@ async def test_full_auth_lifecycle(
     async_client: AsyncClient,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Complete happy-path lifecycle exercising every Phase 1–4 auth endpoint."""
+    """Complete happy-path lifecycle exercising every Phase 1-4 auth endpoint."""
     email = "e2e_lifecycle@example.com"
     auth = lambda t: {"Authorization": f"Bearer {t}"}  # noqa: E731
 
@@ -70,11 +76,19 @@ async def test_full_auth_lifecycle(
     assert verify.status_code == 200
 
     # 3. Login (no MFA)
+    # The access token is in the JSON body; the refresh token is in the
+    # ``zt_rt`` HttpOnly cookie (SR-07) stored in the client cookie jar.
     login = await async_client.post(_LOGIN, json={"email": email, "password": _PWD})
     _log(3, "POST", _LOGIN, login)
     assert login.status_code == 200
     d = login.json()
-    access, refresh = d["access_token"], d["refresh_token"]
+    access = d["access_token"]
+    assert (
+        "refresh_token" not in d
+    ), "refresh_token must not appear in JSON body (SR-07)"
+    assert (
+        login.cookies.get("zt_rt") is not None
+    ), "zt_rt cookie must be set after login"
     assert d["token_type"] == "bearer"
     assert d["expires_in"] > 0
 
@@ -85,11 +99,18 @@ async def test_full_auth_lifecycle(
     assert me.json()["email"] == email
     assert me.json()["is_verified"] is True
 
-    # 5. Refresh tokens
-    ref = await async_client.post(_REFRESH, json={"refresh_token": refresh})
+    # 5. Refresh tokens — the httpx client sends the zt_rt cookie automatically.
+    # The response sets a new rotated zt_rt cookie in the client jar.
+    ref = await async_client.post(_REFRESH)
     _log(5, "POST", _REFRESH, ref)
     assert ref.status_code == 200
-    access, refresh = ref.json()["access_token"], ref.json()["refresh_token"]
+    access = ref.json()["access_token"]
+    assert (
+        "refresh_token" not in ref.json()
+    ), "refresh_token must not appear in JSON body after refresh (SR-07)"
+    assert (
+        ref.cookies.get("zt_rt") is not None
+    ), "Rotated zt_rt cookie must be set after refresh"
 
     # 6. MFA setup
     setup = await async_client.post(_MFA_SETUP, headers=auth(access))
@@ -107,10 +128,8 @@ async def test_full_auth_lifecycle(
     _log(7, "POST", _MFA_ENABLE, enable)
     assert enable.status_code == 200
 
-    # 8. Logout (old session)
-    out1 = await async_client.post(
-        _LOGOUT, json={"refresh_token": refresh}, headers=auth(access)
-    )
+    # 8. Logout (old session) — zt_rt cookie is sent automatically.
+    out1 = await async_client.post(_LOGOUT, headers=auth(access))
     _log(8, "POST", _LOGOUT, out1)
     assert out1.status_code == 200
 
@@ -125,10 +144,10 @@ async def test_full_auth_lifecycle(
     )
     _log(9, "POST", _LOGIN + " (MFA)", mfa_login)
     assert mfa_login.status_code == 200
-    access, refresh = (
-        mfa_login.json()["access_token"],
-        mfa_login.json()["refresh_token"],
-    )
+    access = mfa_login.json()["access_token"]
+    assert (
+        mfa_login.cookies.get("zt_rt") is not None
+    ), "zt_rt cookie must be set after MFA login"
 
     # 10. Password change
     pw = await async_client.post(
@@ -153,12 +172,11 @@ async def test_full_auth_lifecycle(
     _log(12, "POST", _LOGIN + " (no MFA)", plain)
     assert plain.status_code == 200
     assert "mfa_required" not in plain.json()
-    access, refresh = plain.json()["access_token"], plain.json()["refresh_token"]
+    access = plain.json()["access_token"]
+    assert plain.cookies.get("zt_rt") is not None
 
-    # 13. Final logout
-    out2 = await async_client.post(
-        _LOGOUT, json={"refresh_token": refresh}, headers=auth(access)
-    )
+    # 13. Final logout — zt_rt cookie sent automatically.
+    out2 = await async_client.post(_LOGOUT, headers=auth(access))
     _log(13, "POST", _LOGOUT, out2)
     assert out2.status_code == 200
 

@@ -225,53 +225,77 @@ This document defines the implementation sequence in eight phases. Each phase ha
 
 ---
 
-## Phase 7 — Admin API + Rate Limiting
+## Phase 7 — Admin API
 
-**Goal:** Complete the admin API for security monitoring and implement the rate limiting middleware.
+**Goal:** Implement the admin API for security monitoring and governance.
 
 **Deliverables:**
 - `admin/router.py`: all admin endpoints (list users, activate, deactivate, unlock, change role)
 - `admin/router.py`: audit log query endpoint with filters
 - `admin/router.py`: security events query endpoint with filters
-- `core/middleware.py`: sliding window rate limit middleware using Redis sorted sets
-- `core/middleware.py`: security headers middleware
-- Rate limit middleware integrated into FastAPI app startup
+- Last-active-admin guard: `deactivate_user` and `change_user_role` block removal of the last active admin
+- Admin mutating endpoints capture `X-Real-IP` and `User-Agent` for audit attribution
 
 **Dependencies:** Phase 6 (audit logs and security events must be populated).
 
 **Security checkpoints:**
 - All admin endpoints require admin role — auditor role cannot modify user state (SR-11)
 - Audit log and security event endpoints accessible to auditor and admin (SR-11)
-- Rate limit middleware returns 429 with Retry-After header when limit exceeded (SR-15)
-- Rate limit uses sliding window (not fixed window) to prevent burst exploitation at window boundaries (SR-15)
+- Deactivating or demoting the last active admin returns 403 (SR-11)
+- Admin mutating actions record the acting admin's real IP and User-Agent (SR-16)
 
 **Test goals:**
-- Sending more than rate limit requests per minute → 429 (SR-15)
 - Admin user can list users, view audit logs, view security events (SR-11)
 - Auditor user can view audit logs and security events but cannot deactivate users (SR-11)
 - Regular user cannot access any /admin/* endpoint → 403 (SR-11)
+- Deactivating or demoting the last active admin → 403 (SR-11)
+- AUDITOR role rejected on activate, deactivate, and role-change endpoints → 403 (SR-11)
 
 ---
 
-## Phase 8 — Frontend Demo + Integration Testing
+## Phase 8 — Rate Limiting
 
-**Goal:** Implement a minimal React frontend that demonstrates the full security flow end-to-end in a browser. Run the full integration test suite and fix any gaps.
+**Goal:** Implement application-layer sliding-window rate limiting middleware (SR-15, T-15).
 
 **Deliverables:**
-- React SPA with TypeScript
-- Pages: Register, Login, MFA Setup, MFA Verify, Dashboard (account + transactions), Step-up modal
-- Axios HTTP client with interceptors: attaches access token to requests; handles 401 by attempting token refresh; redirects to login on refresh failure
-- Auth state management: access token in memory (not localStorage); refresh token in HttpOnly cookie is ideal, or in memory for demo
-- Full integration test suite: `tests/test_auth.py`, `tests/test_tokens.py`, `tests/test_rbac.py`, `tests/test_ownership.py`, `tests/test_rate_limiting.py`, `tests/test_step_up_auth.py`
-- All tests passing
+- `core/middleware.py`: sliding-window rate limit middleware using Redis sorted sets
+- `core/middleware.py`: security headers middleware
+- Rate limit middleware integrated into FastAPI app startup
+- All rate limit thresholds configurable via environment variables (`RATE_LIMIT_*`)
+- `.env`, `.env.test`, and Docker Compose wired for configurable rate limit overrides
+- Manual verification runner updated to stay within per-IP limits during a full test run
 
-**Dependencies:** Phases 1–7 (all backend features must be complete).
+**Dependencies:** Phase 7 (auth and admin endpoints must be complete; Redis already wired from Phase 1).
 
 **Security checkpoints:**
+- Rate limit middleware returns 429 with `Retry-After` header when limit exceeded (SR-15)
+- Sliding window (not fixed window) prevents burst exploitation at window boundaries (SR-15)
+- Rate limit keys are per-IP; separate thresholds per endpoint via environment variables
+
+**Test goals:**
+- Sending more than the configured limit requests per minute → 429 with `Retry-After` header (T-15, SR-15)
+
+---
+
+## Phase 9 — Frontend Demo + Integration Testing
+
+**Goal:** Implement a minimal React frontend that demonstrates the full Zero Trust security flow end-to-end in a browser. This phase also includes TOTP secret encryption at rest (TD-09) as a prerequisite.
+
+**Deliverables:**
+- TD-09 fix: TOTP secrets encrypted at rest using Fernet (`MFA_SECRET_ENCRYPTION_KEY` env var)
+- React SPA with TypeScript (strict mode)
+- Pages: Login, MFA Setup, MFA Verify, Dashboard (account balance + transaction list), Step-up modal
+- Axios HTTP client with interceptors: attaches access token to requests; handles 401 by attempting token refresh; redirects to login on refresh failure
+- Auth state management: access token in memory only (not localStorage); refresh token in memory for demo
+- All existing backend tests still passing after TD-09 changes
+
+**Dependencies:** Phases 1–8 (all backend features must be complete; TD-09 must be fixed before UI is built).
+
+**Security checkpoints:**
+- TOTP secrets stored encrypted (Fernet/AES-GCM) in `users.mfa_secret`; raw secret never persisted (SR-04)
 - Access token not stored in localStorage (susceptible to XSS) — kept in memory
-- Refresh token handled securely (HttpOnly cookie preferred; memory acceptable for demo)
+- Refresh token handled securely (memory acceptable for demo)
 - Frontend does not store MFA secret after enrollment
-- CSP header from Nginx does not need `unsafe-inline` for scripts
 
 **Test goals (complete suite):**
 
@@ -298,5 +322,6 @@ This document defines the implementation sequence in eight phases. Each phase ha
 | 4 | Authorization (RBAC, ownership, verification) | Core MVP |
 | 5 | Financial logic + step-up authentication | Security-Enhanced MVP |
 | 6 | Password reset + security events | Core MVP + Security-Enhanced MVP |
-| 7 | Admin API + rate limiting | Security-Enhanced MVP |
-| 8 | Frontend demo + full test suite | Security-Enhanced MVP |
+| 7 | Admin API | Security-Enhanced MVP |
+| 8 | Rate limiting | Security-Enhanced MVP |
+| 9 | Frontend demo + TOTP encryption at rest | Security-Enhanced MVP |
