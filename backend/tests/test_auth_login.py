@@ -56,10 +56,11 @@ async def test_login_returns_tokens_for_valid_credentials(
     async_client: AsyncClient,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Successful login with correct credentials returns 200 and all token fields.
+    """Successful login with correct credentials returns 200 with access token in the
+    body and refresh token in the HttpOnly ``zt_rt`` cookie (SR-06, SR-07).
 
-    Asserts that the response body contains access_token, refresh_token,
-    token_type="bearer", and a positive expires_in value (SR-06, SR-07).
+    The refresh token must NOT appear in the JSON body — it is delivered only
+    via ``Set-Cookie`` so that JavaScript cannot read it.
     """
     email = "login_valid@example.com"
     await _register_and_verify(async_client, capsys, email)
@@ -73,10 +74,26 @@ async def test_login_returns_tokens_for_valid_credentials(
 
     data = response.json()
     assert "access_token" in data
-    assert "refresh_token" in data
+    # SR-07: refresh token must be in the HttpOnly cookie, not the JSON body.
+    assert (
+        "refresh_token" not in data
+    ), "refresh_token must not appear in the JSON body (SR-07)"
     assert data["token_type"] == "bearer"
     assert isinstance(data["expires_in"], int)
     assert data["expires_in"] > 0
+    # Verify the HttpOnly cookie is present.
+    assert (
+        response.cookies.get("zt_rt") is not None
+    ), "zt_rt cookie must be set after successful login (SR-07)"
+    # Assert cookie security attributes via the raw Set-Cookie header (SR-07).
+    set_cookie_header = response.headers.get("set-cookie", "")
+    assert "HttpOnly" in set_cookie_header, "zt_rt cookie must be HttpOnly (SR-07)"
+    assert (
+        "Path=/api/v1/auth" in set_cookie_header
+    ), "zt_rt cookie must be scoped to /api/v1/auth (SR-07)"
+    assert (
+        "samesite=lax" in set_cookie_header.lower()
+    ), "zt_rt cookie must have SameSite=lax (SR-07)"
 
 
 @pytest.mark.asyncio
@@ -127,6 +144,9 @@ async def test_login_unverified_user_can_still_login(
     The verification requirement is enforced by the require_verified dependency
     (Phase 4), not here.  Login must succeed so the user can obtain a token
     and then be redirected to complete verification.
+
+    The refresh token is delivered via the ``zt_rt`` HttpOnly cookie (SR-07),
+    not in the JSON body.
     """
     email = "login_unverified@example.com"
     register_resp = await async_client.post(
@@ -143,7 +163,9 @@ async def test_login_unverified_user_can_still_login(
     assert response.status_code == 200
     data = response.json()
     assert "access_token" in data
-    assert "refresh_token" in data
+    # SR-07: refresh token is in the HttpOnly cookie, not the JSON body.
+    assert "refresh_token" not in data
+    assert response.cookies.get("zt_rt") is not None
 
 
 @pytest.mark.asyncio
@@ -537,6 +559,13 @@ async def test_concurrent_logins_produce_independent_sessions(
     Each login creates its own Redis session and access token.  Both tokens
     must work because the service does NOT revoke prior sessions on login.
     After logging out with one token, the other must still be valid.
+
+    The refresh token for each login is stored in the ``zt_rt`` HttpOnly
+    cookie (SR-07).  The httpx client automatically updates its cookie jar
+    on each ``Set-Cookie`` response, so after the second login the cookie
+    jar holds the second session's refresh token.  To log out the first
+    session independently we explicitly pass its refresh token via the
+    cookie parameter.
     """
     email = f"concurrent_{uuid.uuid4().hex[:8]}@example.com"
     await _register_and_verify(async_client, capsys, email)
@@ -547,7 +576,10 @@ async def test_concurrent_logins_produce_independent_sessions(
     )
     assert login_1.status_code == 200
     token_1 = login_1.json()["access_token"]
-    refresh_1 = login_1.json()["refresh_token"]
+    # Capture the refresh token from the cookie before the second login
+    # overwrites it in the client's cookie jar.
+    refresh_cookie_1 = login_1.cookies.get("zt_rt")
+    assert refresh_cookie_1 is not None
 
     login_2 = await async_client.post(
         _LOGIN_URL,
@@ -569,10 +601,11 @@ async def test_concurrent_logins_produce_independent_sessions(
     assert me_1.status_code == 200
     assert me_2.status_code == 200
 
+    # Log out session 1 by explicitly passing its refresh token cookie.
     logout = await async_client.post(
         "/api/v1/auth/logout",
-        json={"refresh_token": refresh_1},
         headers={"Authorization": f"Bearer {token_1}"},
+        cookies={"zt_rt": refresh_cookie_1},
     )
     assert logout.status_code == 200
 

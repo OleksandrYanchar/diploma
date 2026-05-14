@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useSearchParams, useNavigate } from "react-router-dom";
-import { useForm } from "react-hook-form";
+import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { passwordResetConfirmSchema, type PasswordResetConfirmFormValues } from "../schemas";
 import { confirmPasswordReset } from "../api";
@@ -23,12 +23,12 @@ export function PasswordResetConfirmPage(): React.ReactElement {
     register,
     handleSubmit,
     setValue,
-    watch,
+    control,
     formState: { errors, isSubmitting },
   } = useForm<PasswordResetConfirmFormValues>({
     resolver: zodResolver(passwordResetConfirmSchema),
   });
-  const watchedPassword = watch("new_password", "");
+  const watchedPassword = useWatch({ control, name: "new_password", defaultValue: "" });
 
   useEffect(() => {
     if (tokenFromUrl) setValue("token", tokenFromUrl);

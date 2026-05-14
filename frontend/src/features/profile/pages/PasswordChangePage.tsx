@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useForm } from "react-hook-form";
+import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { changePasswordSchema, type ChangePasswordFormValues } from "../schemas";
 import { apiClient } from "@/shared/api/client";
@@ -19,10 +19,10 @@ export function PasswordChangePage(): React.ReactElement {
   const {
     register,
     handleSubmit,
-    watch,
+    control,
     formState: { errors, isSubmitting },
   } = useForm<ChangePasswordFormValues>({ resolver: zodResolver(changePasswordSchema) });
-  const watchedPassword = watch("new_password", "");
+  const watchedPassword = useWatch({ control, name: "new_password", defaultValue: "" });
 
   async function onSubmit(values: ChangePasswordFormValues): Promise<void> {
     setServerError(null);

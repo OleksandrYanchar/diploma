@@ -58,7 +58,7 @@ export function MfaLoginPage(): React.ReactElement {
       const userRes = await apiClient.get<AuthUser>("/users/me", {
         headers: { Authorization: `Bearer ${result.access_token}` },
       });
-      authLogin(userRes.data, result.access_token, result.refresh_token);
+      authLogin(userRes.data, result.access_token);
       navigate("/dashboard");
     } catch (err) {
       setServerError(extractErrorMessage(err));

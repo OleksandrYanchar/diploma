@@ -4,12 +4,17 @@ Covers login, token responses, token refresh, logout, MFA, step-up
 authentication, and password management.
 
 Security properties:
-- ``TokenResponse`` never exposes the raw refresh token hash; only the raw
-  token (issued once at login/refresh) is returned to the client (SR-07).
+- ``TokenResponse`` contains only the access token; the refresh token is
+  delivered exclusively via an HttpOnly ``Set-Cookie`` header (SR-07).
+  Removing the refresh token from the JSON body prevents JavaScript from
+  reading it, which eliminates the XSS token-theft vector.
 - ``LoginRequest`` accepts only email + password at the schema level; TOTP
   code is optional because the MFA step may be a separate round-trip (SR-04).
 - ``StepUpRequest`` carries only the TOTP code; the user identity is derived
   from the JWT access token on the server side, not from client-supplied data.
+- ``RefreshRequest`` and ``LogoutRequest`` are intentionally absent: the
+  refresh token is read from the ``zt_rt`` HttpOnly cookie on the server side,
+  so no client-supplied body field is needed or accepted for those endpoints.
 """
 
 from pydantic import BaseModel, EmailStr, Field
@@ -43,34 +48,16 @@ class MFARequiredResponse(BaseModel):
 class TokenResponse(BaseModel):
     """Returned on successful login or token refresh.
 
-    Contains the raw access token (JWT) and the raw refresh token (opaque).
-    Both are single-use in the sense that the refresh token is rotated on
-    every use and the access token is short-lived (SR-06, SR-07).
+    Contains only the short-lived JWT access token.  The opaque refresh token
+    is delivered separately via an HttpOnly ``Set-Cookie: zt_rt=...`` header
+    so that JavaScript cannot read it, eliminating the XSS token-theft vector
+    (SR-07).  The access token is short-lived (SR-06) and must be kept in
+    memory by the client — not in localStorage.
     """
 
     access_token: str
-    refresh_token: str
     token_type: str = "bearer"
     expires_in: int = Field(description="Access token lifetime in seconds.")
-
-
-class RefreshRequest(BaseModel):
-    """Request body for POST /auth/refresh."""
-
-    refresh_token: str = Field(
-        min_length=1,
-        description="The raw refresh token received at login.",
-    )
-
-
-class LogoutRequest(BaseModel):
-    """Request body for POST /auth/logout.
-
-    The access token comes from the Authorization header; only the refresh
-    token needs to be supplied in the body so it can be revoked.
-    """
-
-    refresh_token: str = Field(min_length=1)
 
 
 class MFASetupResponse(BaseModel):

@@ -222,9 +222,14 @@ class Settings(BaseSettings):
         description="Max POST /auth/login requests per IP per window (SR-15).",
     )
     rate_limit_refresh_max: int = Field(
-        default=30,
+        default=60,
         ge=1,
-        description="Max POST /auth/refresh requests per IP per window (SR-15).",
+        description=(
+            "Max POST /auth/refresh requests per IP per window (SR-15). "
+            "Higher than login because page reload, new tab, and 401-interceptor "
+            "recovery naturally call this endpoint. Security is enforced by SR-08 "
+            "token-rotation reuse detection, not rate limiting alone."
+        ),
     )
     rate_limit_register_max: int = Field(
         default=5,
@@ -245,6 +250,24 @@ class Settings(BaseSettings):
         description=(
             "List of allowed CORS origins.  "
             "Lock down to the frontend URL in production."
+        ),
+    )
+
+    # Cookie security attributes (SR-07: refresh token delivered via HttpOnly cookie)
+    cookie_secure: bool = Field(
+        default=False,
+        description=(
+            "Set the Secure attribute on auth cookies. "
+            "Must be True in production (HTTPS). "
+            "False allows HTTP in local development."
+        ),
+    )
+    cookie_samesite: str = Field(
+        default="lax",
+        description=(
+            "SameSite attribute for auth cookies. "
+            "'lax' is correct for same-origin deployments via Nginx. "
+            "Never set to 'none' without Secure=True."
         ),
     )
 
@@ -338,6 +361,63 @@ class Settings(BaseSettings):
             msg = f"environment must be one of {allowed}, got '{value}'."
             raise ValueError(msg)
         return value
+
+    @field_validator("cookie_samesite")
+    @classmethod
+    def cookie_samesite_must_be_valid(cls, value: str) -> str:
+        """Reject SameSite values outside the recognised set.
+
+        Only 'lax', 'strict', and 'none' are valid per the RFC.  'none' must
+        be paired with Secure=True in production; the validator does not enforce
+        that combination here because cookie_secure is a separate field, but the
+        deployment documentation must cover it.
+        """
+        allowed = {"lax", "strict", "none"}
+        if value not in allowed:
+            msg = (
+                f"cookie_samesite must be one of {allowed}, got '{value}'.  "
+                "Note: 'none' requires cookie_secure=True in production."
+            )
+            raise ValueError(msg)
+        return value
+
+    @model_validator(mode="after")
+    def cookie_secure_must_be_true_in_production(self) -> "Settings":
+        """Reject cookie_secure=False when running in a production environment.
+
+        In production all traffic is served over HTTPS, so the Secure cookie
+        attribute must be set.  Without it the browser will transmit the
+        HttpOnly refresh token over plain HTTP, defeating SR-07.
+
+        This validator does not run during test or development environments
+        (environment='test' or 'development'), which intentionally allow HTTP
+        for local development convenience.
+        """
+        if self.environment == "production" and self.cookie_secure is False:
+            raise ValueError(
+                "cookie_secure must be True in production deployments "
+                "(HTTPS required for secure cookies)."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def samesite_none_requires_secure(self) -> "Settings":
+        """Reject SameSite=None when cookie_secure is False.
+
+        Browsers silently drop SameSite=None cookies that lack the Secure
+        attribute (RFC 6265bis, Chrome 80+).  Permitting this combination
+        would produce a cookie that is never sent, breaking the refresh flow
+        entirely — a configuration error that is hard to diagnose at runtime.
+
+        This cross-field constraint is enforced here because field_validator
+        runs per-field and cannot see sibling field values.
+        """
+        if self.cookie_samesite == "none" and self.cookie_secure is False:
+            raise ValueError(
+                "SameSite=None requires Secure=True — browsers reject "
+                "non-Secure SameSite=None cookies."
+            )
+        return self
 
     @classmethod
     def settings_customise_sources(

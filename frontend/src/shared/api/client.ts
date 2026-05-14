@@ -3,12 +3,12 @@
  *
  * Security design:
  *  - Access token is kept in-memory only (never localStorage/sessionStorage).
- *  - Refresh token is persisted in sessionStorage under key "rt" so that a
- *    page reload or new tab in the same session can silently re-authenticate.
- *    DEMO: refresh token stored in sessionStorage for page-reload UX.
- *    Production should use HttpOnly secure cookies instead.
- *  - On 401 the interceptor attempts one silent refresh using the refresh token.
- *    If refresh fails (401/403 or other), auth state is cleared and the user is
+ *  - Refresh token is stored in an HttpOnly cookie set by the backend —
+ *    not accessible to JavaScript. This is the correct production approach.
+ *  - On 401 the interceptor attempts one silent refresh by posting to
+ *    /auth/refresh with no body; the browser sends the HttpOnly cookie
+ *    automatically via withCredentials.
+ *  - If refresh fails (401/403 or other), auth state is cleared and the user is
  *    redirected to /login. If refresh returns 429, the session is NOT cleared —
  *    the rate-limit is transient and the user is still authenticated.
  *  - Concurrent 401s are queued behind a single in-flight refresh promise.
@@ -17,35 +17,26 @@
 import axios, { type AxiosRequestConfig, type InternalAxiosRequestConfig } from "axios";
 import { env } from "@/shared/config/env";
 
-/** sessionStorage key for the persisted refresh token. */
-const RT_STORAGE_KEY = "rt";
-
 // In-memory access token — never written to any storage.
 let accessToken: string | null = null;
 
 /**
- * Write both tokens: access token to memory, refresh token to sessionStorage.
- * DEMO: sessionStorage gives reload persistence without the XSS risk of
- * localStorage for long-lived credentials. Production should use HttpOnly cookies.
+ * Write the access token to memory.
+ * The refresh token is managed entirely by the browser via the HttpOnly
+ * cookie set by the backend — no JS read/write required or possible.
  */
-export function setTokens(access: string, refresh: string): void {
+export function setTokens(access: string): void {
   accessToken = access;
-  sessionStorage.setItem(RT_STORAGE_KEY, refresh);
 }
 
-/** Remove all tokens from memory and sessionStorage. */
+/** Remove the in-memory access token. The HttpOnly refresh cookie is cleared
+ *  by the backend on /auth/logout — no client-side removal needed. */
 export function clearTokens(): void {
   accessToken = null;
-  sessionStorage.removeItem(RT_STORAGE_KEY);
 }
 
 export function getAccessToken(): string | null {
   return accessToken;
-}
-
-/** Read the persisted refresh token from sessionStorage. */
-export function getRefreshToken(): string | null {
-  return sessionStorage.getItem(RT_STORAGE_KEY);
 }
 
 // Callback to notify AuthContext that auth state was cleared (session expired).
@@ -65,6 +56,9 @@ export function registerRefreshRateLimitedHandler(handler: () => void): void {
 export const apiClient = axios.create({
   baseURL: env.apiBaseUrl,
   headers: { "Content-Type": "application/json" },
+  // withCredentials must be true so the browser includes the HttpOnly
+  // zt_rt cookie on every request to the backend (same-origin or CORS).
+  withCredentials: true,
 });
 
 // Request interceptor: attach Authorization header if token present.
@@ -81,6 +75,19 @@ apiClient.interceptors.request.use((config: InternalAxiosRequestConfig) => {
 let isRefreshing = false;
 let pendingRequests: Array<(token: string) => void> = [];
 let pendingRejects: Array<(err: unknown) => void> = [];
+
+/**
+ * Reset all interceptor queue state.
+ * Must be called on logout so that any queued requests from the previous
+ * session cannot leak into the next one. Without this, a logout that fires
+ * mid-flight could leave isRefreshing=true or non-empty pending arrays across
+ * the session boundary.
+ */
+export function resetInterceptorState(): void {
+  isRefreshing = false;
+  pendingRequests = [];
+  pendingRejects = [];
+}
 
 function processPendingRequests(token: string): void {
   pendingRequests.forEach((resolve) => resolve(token));
@@ -126,18 +133,20 @@ apiClient.interceptors.response.use(
       isRefreshing = true;
 
       try {
-        const storedRefreshToken = getRefreshToken();
-        if (!storedRefreshToken) throw new Error("No refresh token");
-
-        const response = await axios.post<{ access_token: string; refresh_token: string }>(
+        // POST /auth/refresh with no body — the browser automatically includes
+        // the HttpOnly zt_rt cookie. withCredentials is set on the axios instance
+        // but we also pass it explicitly here because this call uses the raw
+        // axios singleton (not apiClient) to avoid triggering the interceptor again.
+        // In production: POST /api/auth/refresh
+        const response = await axios.post<{ access_token: string }>(
           `${env.apiBaseUrl}/auth/refresh`,
-          { refresh_token: storedRefreshToken }
+          undefined,
+          { withCredentials: true }
         );
 
         const newAccess = response.data.access_token;
-        const newRefresh = response.data.refresh_token;
 
-        setTokens(newAccess, newRefresh);
+        setTokens(newAccess);
         processPendingRequests(newAccess);
 
         if (originalRequest.headers) {

@@ -92,7 +92,7 @@ async def test_protected_endpoint_accepts_valid_token(
     """GET /test-protected with a valid token and live session
     returns 200 (SR-06, SR-09, SR-10)."""
     email = "dep_valid@example.com"
-    _, access_token, _ = await register_verify_login(async_client, capsys, email)
+    _, access_token = await register_verify_login(async_client, capsys, email)
 
     response = await async_client.get(
         _PROTECTED_URL,
@@ -113,7 +113,7 @@ async def test_protected_endpoint_rejects_missing_redis_session(
 ) -> None:
     """GET /test-protected returns 401 when the Redis session key is absent (SR-10)."""
     email = "dep_no_session@example.com"
-    _, access_token, _ = await register_verify_login(async_client, capsys, email)
+    _, access_token = await register_verify_login(async_client, capsys, email)
 
     settings = Settings()  # type: ignore[call-arg]
     decoded = pyjwt.decode(
@@ -141,7 +141,7 @@ async def test_protected_endpoint_rejects_blacklisted_token(
 ) -> None:
     """GET /test-protected returns 401 when the JTI is blacklisted in Redis (SR-09)."""
     email = "dep_blacklisted@example.com"
-    _, access_token, _ = await register_verify_login(async_client, capsys, email)
+    _, access_token = await register_verify_login(async_client, capsys, email)
 
     settings = Settings()  # type: ignore[call-arg]
     decoded = pyjwt.decode(
@@ -169,7 +169,7 @@ async def test_protected_endpoint_rejects_deactivated_user(
 ) -> None:
     """Deactivated user's valid token is rejected with 403 (SR-05)."""
     email = "dep_deactivated@example.com"
-    _, access_token, _ = await register_verify_login(async_client, capsys, email)
+    _, access_token = await register_verify_login(async_client, capsys, email)
 
     result = await db_session.execute(select(User).where(User.email == email))
     user = result.scalar_one()
@@ -192,7 +192,7 @@ async def test_protected_endpoint_rejects_locked_user(
 ) -> None:
     """Locked user's valid token is rejected with 403 (SR-05)."""
     email = "dep_locked@example.com"
-    _, access_token, _ = await register_verify_login(async_client, capsys, email)
+    _, access_token = await register_verify_login(async_client, capsys, email)
 
     result = await db_session.execute(select(User).where(User.email == email))
     user = result.scalar_one()

@@ -1,6 +1,6 @@
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "@/lib/auth";
-import { apiClient, getRefreshToken } from "@/shared/api/client";
+import { apiClient } from "@/shared/api/client";
 
 interface NavLinkProps {
   to: string;
@@ -25,11 +25,10 @@ export function Layout({ children }: { children: React.ReactNode }): React.React
   const navigate = useNavigate();
 
   async function handleLogout(): Promise<void> {
-    const rt = getRefreshToken();
     try {
-      if (rt) {
-        await apiClient.post("/auth/logout", { refresh_token: rt });
-      }
+      // POST /auth/logout with no body — the browser sends the HttpOnly zt_rt
+      // cookie automatically via withCredentials. The backend clears the cookie.
+      await apiClient.post("/auth/logout");
     } catch {
       // Best-effort logout — clear client state regardless.
     }

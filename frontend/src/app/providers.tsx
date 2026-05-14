@@ -5,6 +5,7 @@ import { AuthContext, type AuthUser } from "@/lib/auth";
 import {
   setTokens,
   clearTokens,
+  resetInterceptorState,
   registerUnauthenticatedHandler,
   registerRefreshRateLimitedHandler,
   getAccessToken,
@@ -27,36 +28,33 @@ const queryClient = new QueryClient({
 //
 // React StrictMode in development intentionally mounts → unmounts → remounts
 // every component to expose side-effect bugs. A plain useEffect would therefore
-// fire twice per page load. On the second fire it reads the same (unrotated)
-// refresh token from sessionStorage and re-submits it to /auth/refresh. The
-// backend treats this as a reuse event (SR-08) and bulk-revokes all user
-// tokens, logging the user out immediately.
+// fire twice per page load. On the second fire it would re-submit the refresh
+// request, which the backend could treat as a token reuse event (SR-08) and
+// bulk-revoke all user tokens.
 //
 // Placing the fetch in a module-level variable makes it a true singleton: both
 // mount invocations call getBootstrapUser() and get the same Promise back.
 // Only one network request is ever made per page-load regardless of how many
 // times React mounts the component.
 //
-// Rapid F5 limitation: if the user reloads faster than the /auth/refresh
-// network round-trip, the next page load reads the still-unrotated token from
-// sessionStorage and triggers backend reuse detection. This is an inherent
-// limitation of sessionStorage + server-side token rotation. The safest
-// production fix is HttpOnly cookies (the browser manages the cookie
-// atomically, so a second request carries the already-rotated cookie). For
-// this demo the UX degrades gracefully: a clean "session expired" message is
-// shown rather than a confusing broken state.
-//
-// DEMO: sessionStorage refresh token for reload persistence. Production should
-// use HttpOnly secure cookies — they are browser-managed and immune to this
-// race.
+// With HttpOnly cookies, the browser sends the zt_rt cookie atomically on each
+// request. There is no client-side storage race — the browser guarantees the
+// rotated cookie from the first /auth/refresh response is used on any
+// subsequent request in that session.
 // ---------------------------------------------------------------------------
-let _bootstrapPromise: Promise<AuthUser | null> | null = null;
+
+interface BootstrapResult {
+  user: AuthUser | null;
+  rateLimited: boolean;
+}
+
+let _bootstrapPromise: Promise<BootstrapResult> | null = null;
 
 /**
  * Reset the module-level bootstrap singleton.
  * Called after login() and logout() so that a subsequent page reload (or
- * re-login in the same JS runtime) re-runs the bootstrap flow with the new
- * token set rather than returning the previous promise's cached result.
+ * re-login in the same JS runtime) re-runs the bootstrap flow rather than
+ * returning the previous promise's cached result.
  * Not exported — only AuthProvider's login/logout callbacks call this.
  */
 function resetBootstrap(): void {
@@ -64,52 +62,59 @@ function resetBootstrap(): void {
 }
 
 /**
- * Attempt silent re-authentication using any tokens available at the time of
- * the first call. Returns the authenticated user or null if no valid session
- * exists. Subsequent calls within the same page-load return the same Promise.
+ * Attempt silent re-authentication on page load using the HttpOnly zt_rt cookie.
+ * Returns the authenticated user on success, or null on any failure.
+ * Subsequent calls within the same page-load return the same Promise
+ * (singleton pattern — safe under React StrictMode double-mount).
+ *
+ * Priority order:
+ * 1. Access token already in memory (normal in-app navigation) → skip refresh,
+ *    call /users/me to validate and hydrate user state.
+ * 2. No in-memory access token → POST /auth/refresh (cookie sent automatically),
+ *    then /users/me.
+ * 3. Any failure (401 first-visit, 401 expired, 500, network error) → null.
+ *
+ * The "session expired" banner is NOT driven from this path. It is driven
+ * exclusively by the response interceptor's onUnauthenticated callback, which
+ * fires when a mid-session API call returns 401. Bootstrap failures are always
+ * silent — they could be a first visit, expired session, or server error, and
+ * none of those cases warrant a "session expired" message on page load.
  */
-function getBootstrapUser(): Promise<AuthUser | null> {
+function getBootstrapUser(): Promise<BootstrapResult> {
   if (_bootstrapPromise !== null) return _bootstrapPromise;
 
-  // Snapshot token availability at the moment of the first call. Reading
-  // sessionStorage here — before any React cleanup — ensures we see the token
-  // that was written by the previous page load's setTokens() call.
-  const storedRT = sessionStorage.getItem("rt");
   const hasAccessToken = !!getAccessToken();
 
-  if (!storedRT && !hasAccessToken) {
-    // No tokens at all — first visit or already logged out.
-    _bootstrapPromise = Promise.resolve(null);
-    return _bootstrapPromise;
-  }
-
-  _bootstrapPromise = (async (): Promise<AuthUser | null> => {
+  _bootstrapPromise = (async (): Promise<BootstrapResult> => {
     try {
-      if (!hasAccessToken && storedRT) {
-        // Page reload path: exchange stored refresh token for a new access +
-        // refresh pair. Write the rotated tokens immediately — before any
-        // React effects can read sessionStorage again — so there is no window
-        // in which the old token is visible.
-        // In production: POST /api/auth/refresh (HttpOnly cookie carries the RT).
-        const refreshRes = await axios.post<{
-          access_token: string;
-          refresh_token: string;
-        }>(`${env.apiBaseUrl}/auth/refresh`, { refresh_token: storedRT });
-
-        // setTokens writes access token to memory and refresh token to
-        // sessionStorage atomically from the caller's perspective.
-        setTokens(refreshRes.data.access_token, refreshRes.data.refresh_token);
+      if (!hasAccessToken) {
+        // Page reload path: ask the backend to rotate the HttpOnly cookie and
+        // return a fresh access token. The browser sends the zt_rt cookie
+        // automatically because withCredentials is set on the axios instance.
+        // In production: POST /api/auth/refresh
+        const refreshRes = await axios.post<{ access_token: string }>(
+          `${env.apiBaseUrl}/auth/refresh`,
+          undefined,
+          { withCredentials: true }
+        );
+        setTokens(refreshRes.data.access_token);
       }
 
       // Validate the (now-fresh) access token and populate user state.
       // In production: GET /api/users/me
       const userRes = await apiClient.get<AuthUser>("/users/me");
-      return userRes.data;
-    } catch {
-      // Refresh or /users/me failed — clear any stale tokens so subsequent
-      // calls (e.g., from the 401 interceptor) do not try to use them.
-      clearTokens();
-      return null;
+      return { user: userRes.data, rateLimited: false };
+    } catch (err) {
+      const is429 = axios.isAxiosError(err) && err.response?.status === 429;
+      if (!is429) {
+        // 401 (no cookie / expired), 500, or network error — session is gone.
+        clearTokens();
+      }
+      // On 429: do not clear the in-memory access token. The cookie is still
+      // valid. Reset the singleton so the next page load retries fresh rather
+      // than serving this cached rate-limited result.
+      if (is429) _bootstrapPromise = null;
+      return { user: null, rateLimited: is429 };
     }
   })();
 
@@ -118,16 +123,13 @@ function getBootstrapUser(): Promise<AuthUser | null> {
 
 function AuthProvider({ children }: { children: React.ReactNode }): React.ReactElement {
   const [user, setUser] = useState<AuthUser | null>(null);
-  // isLoading starts true when there is any possibility of a silent re-auth
-  // (either an in-memory token or a persisted refresh token in sessionStorage).
-  // Starting it with a lazy initializer avoids a render with isLoading=false
-  // when tokens ARE present — which could briefly show /login before bootstrap
-  // completes.
-  const [isLoading, setIsLoading] = useState(
-    () => !!getAccessToken() || !!sessionStorage.getItem("rt")
-  );
-  // sessionExpired is set when silent refresh fails so the login page can
-  // display an explanatory message rather than just appearing blank.
+  // isLoading always starts true because we cannot detect from JavaScript
+  // whether the HttpOnly zt_rt cookie is present. We always attempt bootstrap
+  // and resolve quickly: the backend returns 401 fast on a first visit, and
+  // on a reload it returns a fresh access token.
+  const [isLoading, setIsLoading] = useState(true);
+  // sessionExpired is set when a cookie existed but the session was revoked or
+  // expired, so the login page can display an explanatory banner.
   const [sessionExpired, setSessionExpired] = useState(false);
   // rateLimited is set when the refresh endpoint returns 429. The user is
   // still considered authenticated; the UI should surface the message.
@@ -136,8 +138,10 @@ function AuthProvider({ children }: { children: React.ReactNode }): React.ReactE
 
   const logout = useCallback(() => {
     clearTokens();
-    // Reset the singleton so the next login + page-reload bootstraps cleanly
-    // with the new token instead of returning this (now-invalid) promise.
+    // Drain any queued interceptor requests from the current session so they
+    // cannot be replayed or resolved with a stale token after logout.
+    resetInterceptorState();
+    // Reset the singleton so the next login + page-reload bootstraps cleanly.
     resetBootstrap();
     setUser(null);
     setSessionExpired(false);
@@ -172,39 +176,34 @@ function AuthProvider({ children }: { children: React.ReactNode }): React.ReactE
    * StrictMode's double-mount fires exactly one network request. Both mount
    * invocations subscribe to the same already-running promise.
    *
-   * Priority order (handled inside getBootstrapUser):
-   * 1. Access token already in memory → call /users/me to validate and hydrate.
-   * 2. Refresh token in sessionStorage → POST /auth/refresh, then /users/me.
-   * 3. No tokens → resolve immediately with null.
+   * sessionExpired is NOT set from the bootstrap path. Any failure here
+   * (first visit, expired cookie, or server error) is indistinguishable on the
+   * client and none warrants a "session expired" banner on page load.
+   * The banner is only shown when onUnauthenticated fires mid-session.
    */
   useEffect(() => {
-    // Capture whether a refresh token was present when this effect ran.
-    // getBootstrapUser() may clear it on failure, so we snapshot it now.
-    const hadRefreshToken = !!sessionStorage.getItem("rt");
-
-    void getBootstrapUser().then((bootstrappedUser) => {
-      if (bootstrappedUser) {
+    void getBootstrapUser().then(({ user: bootstrappedUser, rateLimited }) => {
+      if (bootstrappedUser !== null) {
         setUser(bootstrappedUser);
-      } else if (hadRefreshToken) {
-        // A refresh token existed but bootstrap failed (expired, reused, or
-        // revoked). Show the "session expired" banner on the login page.
-        setSessionExpired(true);
       }
-      // If neither condition is true the user simply has no session — first
-      // visit or explicit logout. Do not set sessionExpired in that case.
+      if (rateLimited) {
+        setRateLimitMessage(
+          "Too many session refresh attempts — please try again shortly."
+        );
+      }
       setIsLoading(false);
     });
   }, []); // Empty dep array: runs once per mount; safe under StrictMode because
           // both mounts share the module-level singleton promise.
 
   const login = useCallback(
-    (newUser: AuthUser, accessTok: string, refreshTok: string) => {
+    (newUser: AuthUser, accessTok: string) => {
       setSessionExpired(false);
       setRateLimitMessage(null);
-      setTokens(accessTok, refreshTok);
+      setTokens(accessTok);
       setUser(newUser);
-      // Reset the singleton so a subsequent page reload will bootstrap with
-      // the newly issued refresh token rather than the previous promise result.
+      // Reset the singleton so a subsequent page reload will bootstrap using
+      // the newly issued HttpOnly cookie rather than the previous promise result.
       resetBootstrap();
     },
     []

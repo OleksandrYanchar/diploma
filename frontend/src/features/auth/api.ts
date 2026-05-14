@@ -9,9 +9,10 @@ export interface LoginRequest {
 
 export interface TokenResponse {
   access_token: string;
-  refresh_token: string;
   token_type: string;
   expires_in: number;
+  // refresh_token is no longer in the JSON body — it is delivered as an
+  // HttpOnly cookie (zt_rt) set by the backend and is not accessible to JS.
 }
 
 export interface MFARequiredResponse {

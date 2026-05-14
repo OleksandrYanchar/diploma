@@ -58,6 +58,13 @@ function AdminRoute({
   return <Layout>{children}</Layout>;
 }
 
+/** Redirect to /dashboard if already authenticated. */
+function GuestRoute({ children }: { children: React.ReactNode }): React.ReactElement {
+  const { user } = useAuth();
+  if (user) return <Navigate to="/dashboard" replace />;
+  return <>{children}</>;
+}
+
 function AppRoutes(): React.ReactElement {
   const { user, isLoading } = useAuth();
 
@@ -66,12 +73,12 @@ function AppRoutes(): React.ReactElement {
   return (
     <Routes>
       {/* Public routes */}
-      <Route path="/login" element={<LoginPage />} />
+      <Route path="/login" element={<GuestRoute><LoginPage /></GuestRoute>} />
       <Route path="/mfa/login" element={<MfaLoginPage />} />
-      <Route path="/register" element={<RegisterPage />} />
+      <Route path="/register" element={<GuestRoute><RegisterPage /></GuestRoute>} />
       <Route path="/verify-email" element={<VerifyEmailPage />} />
-      <Route path="/password-reset" element={<PasswordResetRequestPage />} />
-      <Route path="/password-reset/confirm" element={<PasswordResetConfirmPage />} />
+      <Route path="/password-reset" element={<GuestRoute><PasswordResetRequestPage /></GuestRoute>} />
+      <Route path="/password-reset/confirm" element={<GuestRoute><PasswordResetConfirmPage /></GuestRoute>} />
 
       {/* Protected routes */}
       <Route
